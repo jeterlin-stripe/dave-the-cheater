@@ -2,6 +2,12 @@
 
 A Windows GUI for a supported Steam installation of **DAVE THE DIVER**, using Python, Tkinter and the standard library. No downloaded trainers or runtime injection.
 
+## GUI preview
+
+![Dave the Cheater GUI with English controls, feature switches, speed multiplier and Steam launch button](docs/images/gui.png)
+
+The top-right language selector switches between **English** and **繁體中文**.
+
 ## Features
 
 - Swimming speed multiplier, 0.1x to 20x.
@@ -32,7 +38,22 @@ Then double-click `Start-Dave-Controls.cmd`, or run:
 python control_panel.py
 ```
 
-Select your game folder, choose settings, click Apply settings, then Launch game. The language selector is at the top right. See [Traditional Chinese instructions](GUI-使用說明.md).
+## How to use
+
+1. **Close DAVE THE DIVER completely.** Steam can remain open.
+2. Open **Start-Dave-Controls.cmd**, or run `python control_panel.py`.
+3. Click **Game folder** and select the folder containing `DaveTheDiver.exe`.
+4. Choose **English** or **繁體中文** from the top-right language selector.
+5. Enable or disable **Infinite ammo**, **Invincible**, and **Infinite cargo drone**. A checked, teal button means enabled.
+6. Enter a **Swimming speed multiplier**, such as `3.5`. `1` restores normal swimming speed; the allowed range is `0.1`–`20`.
+7. Click **Apply settings**. Wait for the green, bold success message confirming the files were written and checked.
+8. Click **Launch game** to start through Steam, then test the changes in-game.
+
+Editing a field or switch does not apply it automatically. If you launch with unapplied changes, the GUI asks whether to use the previously applied settings. A running game blocks file changes.
+
+**Read current settings** reloads the actual file settings. **Restore all defaults** restores the original game files, disables the feature patches (including oxygen), and returns speed to `1`. Normal Apply settings preserves the existing oxygen-patch state.
+
+If ammo or drone uses are already zero, you may need to refill or start a new dive first. See [繁體中文操作說明](GUI-使用說明.md) for the Chinese guide.
 
 ## Scope and verification
 

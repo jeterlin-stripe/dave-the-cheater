@@ -10,3 +10,8 @@
 !/test_control_panel.py
 !/test_source.py
 !/Start-Dave-Controls.cmd
+!/docs/
+/docs/*
+!/docs/images/
+/docs/images/*
+!/docs/images/gui.png
