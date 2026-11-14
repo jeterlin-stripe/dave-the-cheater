@@ -27,8 +27,10 @@ This tool supports one specific build. The observed title screen reported `v1.0.
 Game binaries, modified game files, backups, preferences and reports are not distributed in this repository. For a fresh checkout, prepare ignored local backups from your own unmodified supported installation:
 
 ```powershell
-python prepare_backups.py --game 'D:/SteamLibrary/steamapps/common/Dave the Diver'
+python prepare_backups.py
 ```
+
+The game folder is detected from Steam's library folders and the game's app manifest. If detection fails, pass it explicitly, for example `python prepare_backups.py --game 'D:/SteamLibrary/steamapps/common/Dave the Diver'`.
 
 Preparation validates both originals before creating backups. It does not modify game files. Existing verified backups are retained. Unsupported or already-modified originals are rejected.
 
@@ -42,14 +44,14 @@ python control_panel.py
 
 1. **Close DAVE THE DIVER completely.** Steam can remain open.
 2. Open **Start-Dave-Controls.cmd**, or run `python control_panel.py`.
-3. Click **Game folder** and select the folder containing `DaveTheDiver.exe`.
+3. Check the detected game folder. If it is empty or wrong, click **Game folder** and select the folder containing `DaveTheDiver.exe`.
 4. Choose **English** or **繁體中文** from the top-right language selector.
 5. Enable or disable **Infinite ammo**, **Invincible**, and **Infinite cargo drone**. A checked, teal button means enabled.
 6. Enter a **Swimming speed multiplier**, such as `3.5`. `1` restores normal swimming speed; the allowed range is `0.1`–`20`.
 7. Click **Apply settings**. Wait for the green, bold success message confirming the files were written and checked.
 8. Click **Launch game** to start through Steam, then test the changes in-game.
 
-Editing a field or switch does not apply it automatically. If you launch with unapplied changes, the GUI asks whether to use the previously applied settings. A running game blocks file changes.
+Editing a field or switch does not apply it automatically. If you launch with unapplied changes, the GUI asks whether to use the previously applied settings. A running game blocks file changes. Each file is written to a temporary copy and then swapped in, so an interrupted write leaves the previous file; if the second file or the final read-back check fails, the first file is rolled back.
 
 **Read current settings** reloads the actual file settings. **Restore all defaults** restores the original game files, disables the feature patches (including oxygen), and returns speed to `1`. Normal Apply settings preserves the existing oxygen-patch state.
 
@@ -69,12 +71,13 @@ The user reported that the oxygen patch works. Other effects have not been compr
 python -m unittest discover -v
 ```
 
-Source checks need no game files. File-integration tests skip unless original backups are present. Integration tests use temporary fixtures instead of the real installation; they cover patch combinations, multiplier bounds, version mismatch, game-running guards, restore and rollback.
+Source checks need no game files. File-integration tests skip unless original backups are present. Integration tests use temporary fixtures instead of the real installation; they cover patch combinations, multiplier bounds, version mismatch, legacy and partial patches, game-running guards, restore, and rollback after write or read-back failures.
 
 ## Files
 
 For parameter discovery, adding features, and remapping after game updates, read [AGENTS.md](AGENTS.md).
 
+- `dave_profile.py`: supported hashes, patch sites, backup paths and Steam game detection.
 - `control_panel.py`: GUI and guarded file updates.
 - `gui_language.py`: translations.
 - `inspect_dave.py`: UnityFS/LZ4/Addressables/serialized-asset inspection and rebuilding.

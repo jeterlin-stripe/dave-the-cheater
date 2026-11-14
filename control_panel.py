@@ -1,41 +1,42 @@
 """Local file-based DAVE controls. Python standard library only; no injection."""
 import ctypes
 from ctypes import wintypes
-import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import struct
+import tempfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from inspect_dave import bundle_files, write_bundle
+# Profile names are re-exported here for tests and existing callers.
+from dave_profile import (BUNDLE_BACKUP, BUNDLE_HASH, BUNDLE_NAME, BUNDLE_RELATIVE, HERE, NATIVE_BACKUP,  # noqa: F401
+                          NATIVE_HASH, NODE_NAME, PATCHES, SPEED_OFFSET, STEAM_APP_ID, digest, find_game)
 from gui_language import translate
-
-HERE = Path(__file__).resolve().parent
-DEFAULT_GAME = Path(r"G:\SteamLibrary\steamapps\common\Dave the Diver")
-NATIVE_HASH = "ed213c248bf53e62a3bf2223ff3f89467a6edff6cec7d3ea921ada6a6e2a6600"
-BUNDLE_HASH = "9800d47efc3d4106b1207530c92c0be6ecdda4647c378e4fc3d7aa662d93ea7e"
-BUNDLE_NAME = "7314e4d32b10a297b1b8f2c2d3fac26f.bundle"
-NODE_NAME = "CAB-3fc8e257bbfa28c753fb863c50d033ff"
-SPEED_OFFSET = 7500
-PATCHES = [
-    ("oxygen", 24359754, bytes.fromhex("f3440f58c6"), bytes.fromhex("9090909090")),
-    ("ammo", 24285869, bytes.fromhex("83ea01"), bytes.fromhex("83ea00")),
-    ("ammo", 24289351, bytes.fromhex("83e901"), bytes.fromhex("83e900")),
-    ("invincible", 8236080, bytes.fromhex("48895c"), bytes.fromhex("b001c3")),
-    ("invincible", 24369456, bytes.fromhex("48"), bytes.fromhex("c3")),
-    # PlayerCharacter.AvailableLiftDroneCount decrements in cargo interactions.
-    ("drone", 26938848, bytes.fromhex("ff8ad0010000"), b"\x90" * 6),
-    ("drone", 26941952, bytes.fromhex("ff8ad0010000"), b"\x90" * 6),
-    ("drone", 27154928, bytes.fromhex("ff8ad0010000"), b"\x90" * 6),
-    ("drone", 29786718, bytes.fromhex("ff8ad0010000"), b"\x90" * 6),
-]
+from inspect_dave import bundle_files, write_bundle
 
 
-def digest(data):
-    return hashlib.sha256(data).hexdigest()
+def atomic_write(path, data):
+    """Write a sibling temporary file, flush it to disk, then replace `path` in one step.
+
+    An interruption leaves either the old or the new file, never a truncated one.
+    The replace fails, like an in-place write, while another process holds the file open.
+    """
+    path = Path(path)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def game_running():
@@ -77,11 +78,13 @@ def game_running():
 
 class Controller:
     def __init__(self, game):
+        if not str(game).strip():
+            raise ValueError("請先選擇遊戲資料夾。")
         self.game = Path(game).resolve()
         self.native_path = self.game / "GameAssembly.dll"
-        self.bundle_path = self.game / "DaveTheDiver_Data/StreamingAssets/aa/StandaloneWindows64" / BUNDLE_NAME
-        self.native_original = (HERE / "resources-upgrade/original/GameAssembly.dll").read_bytes()
-        self.bundle_original_path = HERE / "swim-1.5x/original" / BUNDLE_NAME
+        self.bundle_path = self.game / BUNDLE_RELATIVE
+        self.native_original = NATIVE_BACKUP.read_bytes()
+        self.bundle_original_path = BUNDLE_BACKUP
         self.bundle_original = self.bundle_original_path.read_bytes()
         if digest(self.native_original) != NATIVE_HASH or digest(self.bundle_original) != BUNDLE_HASH:
             raise ValueError("原始備份校驗失敗，請保留檔案並停止操作。")
@@ -167,21 +170,19 @@ class Controller:
             for path, previous, replacement in [(self.native_path, old_native, new_native), (self.bundle_path, old_bundle, new_bundle)]:
                 if previous == replacement:
                     continue
-                # r+b does not truncate an inaccessible/locked file before checking access.
-                with path.open("r+b") as stream:
-                    written.append((path, previous))
-                    stream.write(replacement)
-                    stream.truncate()
-                    stream.flush()
+                atomic_write(path, replacement)
+                written.append((path, previous))
                 if path.read_bytes() != replacement:
                     raise OSError("寫入後校驗失敗。")
+            # Verification is inside the rollback scope: a mismatch restores the previous files.
+            verified, _, _ = self.read()
+            if any(verified[key] != bool(settings.get(key, False)) for key in ("ammo", "oxygen", "invincible", "drone")) or not math.isclose(verified["speed"], float(settings["speed"]), rel_tol=1e-6):
+                raise OSError("讀回的設定與預期不同。")
         except Exception as error:
             rollback_errors = []
             for path, previous in reversed(written):
                 try:
-                    with path.open("r+b") as stream:
-                        stream.write(previous)
-                        stream.truncate()
+                    atomic_write(path, previous)
                     if path.read_bytes() != previous:
                         raise OSError("還原校驗失敗")
                 except Exception as rollback_error:
@@ -189,9 +190,6 @@ class Controller:
             if rollback_errors:
                 raise OSError("套用失敗，且自動還原不完整。請勿啟動遊戲。\n" + "\n".join(rollback_errors)) from error
             raise OSError(f"未能套用，已保留／還原先前版本。\n{error}") from error
-        verified, _, _ = self.read()
-        if any(verified[key] != bool(settings.get(key, False)) for key in ("ammo", "oxygen", "invincible", "drone")) or not math.isclose(verified["speed"], float(settings["speed"]), rel_tol=1e-6):
-            raise OSError("讀回的設定與預期不同。請先不要啟動遊戲。")
         # A log failure must not make a successful game-file update look like a failed one.
         try:
             (HERE / "gui-last-settings.json").write_text(json.dumps({"game": str(self.game), **verified}, indent=2), encoding="utf8")
@@ -216,7 +214,11 @@ class Panel(tk.Tk):
         self.geometry("760x650")
         self.minsize(740, 630)
         self.configure(bg="#101b2a")
-        self.path = tk.StringVar(value=str(DEFAULT_GAME))
+        try:
+            detected = find_game()
+        except Exception:
+            detected = None
+        self.path = tk.StringVar(value=str(detected) if detected else "")
         self.ammo, self.invincible = tk.BooleanVar(), tk.BooleanVar()
         self.drone = tk.BooleanVar()
         self.speed = tk.StringVar(value="3.5")
@@ -327,7 +329,7 @@ class Panel(tk.Tk):
                 parent=self,
             ):
                 return
-            os.startfile("steam://rungameid/1868140")
+            os.startfile(f"steam://rungameid/{STEAM_APP_ID}")
             self.set_status("已向 Steam 發送啟動請求。")
         except Exception as error:
             messagebox.showerror(self.tr("無法啟動遊戲"), self.error_text(error), parent=self)

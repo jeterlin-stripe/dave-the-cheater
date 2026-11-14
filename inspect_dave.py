@@ -416,7 +416,7 @@ def build_copy(game, destination, factor):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--game", type=Path, default=Path(r"G:\SteamLibrary\steamapps\common\Dave the Diver"))
+    parser.add_argument("--game", type=Path, help="Game folder; detected from Steam libraries when omitted")
     parser.add_argument("--find", default="DaveMoveData")
     parser.add_argument("--bundle", type=Path, help="Read and list one UnityFS bundle")
     parser.add_argument("--extract", type=Path, help="Extract bundle nodes into a NEW directory")
@@ -425,6 +425,12 @@ def main():
     parser.add_argument("--build-copy", type=Path, help="Create original/modified bundles in a NEW directory outside the game")
     parser.add_argument("--factor", type=float, default=1.5)
     args = parser.parse_args()
+    needs_game = args.build_copy or args.movement or not (args.serialized or args.bundle)
+    if needs_game and args.game is None:
+        from dave_profile import find_game
+        args.game = find_game()
+        if args.game is None:
+            parser.error("Could not find DAVE THE DIVER in Steam libraries; pass --game.")
     if args.build_copy:
         print(json.dumps(build_copy(args.game, args.build_copy, args.factor), indent=2))
     elif args.movement:

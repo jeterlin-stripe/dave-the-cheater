@@ -11,13 +11,13 @@ from inspect_dave import bundle_files
 class ControlsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        required = [panel.HERE / "resources-upgrade/original/GameAssembly.dll", panel.HERE / "swim-1.5x/original" / panel.BUNDLE_NAME]
+        required = [panel.NATIVE_BACKUP, panel.BUNDLE_BACKUP]
         if not all(path.is_file() for path in required):
             raise unittest.SkipTest("Prepare local original game backups first for file-integration tests.")
         cls.scratch = tempfile.TemporaryDirectory(prefix="dave-controls-")
         cls.game = Path(cls.scratch.name)
         cls.native = cls.game / "GameAssembly.dll"
-        cls.bundle = cls.game / "DaveTheDiver_Data/StreamingAssets/aa/StandaloneWindows64" / panel.BUNDLE_NAME
+        cls.bundle = cls.game / panel.BUNDLE_RELATIVE
         cls.bundle.parent.mkdir(parents=True)
         cls.controller = panel.Controller(cls.game)
 
@@ -30,11 +30,11 @@ class ControlsTest(unittest.TestCase):
         self.bundle.write_bytes(self.controller.bundle_original)
 
     def test_switch_combinations_and_speed(self):
-        for ammo, invincible, oxygen in itertools.product([False, True], repeat=3):
+        for ammo, invincible, oxygen, drone in itertools.product([False, True], repeat=4):
             for factor in [0.1, 3.5, 20]:
-                settings = dict(ammo=ammo, invincible=invincible, oxygen=oxygen, speed=factor)
+                settings = dict(ammo=ammo, invincible=invincible, oxygen=oxygen, drone=drone, speed=factor)
                 native, bundle = self.controller.build(settings)
-                self.assertEqual(self.controller.decode_native(native), {**{k: settings[k] for k in ["ammo", "invincible", "oxygen"]}, "drone": False})
+                self.assertEqual(self.controller.decode_native(native), {k: settings[k] for k in ["ammo", "invincible", "oxygen", "drone"]})
                 self.bundle.write_bytes(bundle)
                 self.assertAlmostEqual(self.controller.decode_bundle()[0], factor, places=5)
 
@@ -80,17 +80,48 @@ class ControlsTest(unittest.TestCase):
         self.assertEqual(self.bundle.read_bytes(), self.controller.bundle_original)
 
     def test_second_write_failure_rolls_back_first(self):
-        real_open = Path.open
-        def guarded_open(path, *args, **kwargs):
-            if path == self.bundle and args and args[0] == "r+b":
+        real_write = panel.atomic_write
+        def guarded_write(path, data):
+            if Path(path) == self.bundle and data != self.controller.bundle_original:
                 raise PermissionError("Simulated locked bundle")
-            return real_open(path, *args, **kwargs)
-        with patch.object(panel, "game_running", return_value=False), patch.object(Path, "open", guarded_open):
+            return real_write(path, data)
+        with patch.object(panel, "game_running", return_value=False), patch.object(panel, "atomic_write", guarded_write):
             with self.assertRaises(OSError):
                 self.controller.apply(dict(ammo=True, invincible=True, oxygen=True, speed=3.5))
         self.assertEqual(self.native.read_bytes(), self.controller.native_original)
         self.assertEqual(self.bundle.read_bytes(), self.controller.bundle_original)
 
+    def test_failed_read_back_rolls_back(self):
+        real_read = panel.Controller.read
+        calls = []
+        def wrong_read_back(controller):
+            calls.append(1)
+            state, native, bundle = real_read(controller)
+            if len(calls) > 1:
+                state = {**state, "ammo": not state["ammo"]}
+            return state, native, bundle
+        with patch.object(panel, "game_running", return_value=False), patch.object(panel.Controller, "read", wrong_read_back):
+            with self.assertRaises(OSError):
+                self.controller.apply(dict(ammo=True, invincible=True, oxygen=True, drone=True, speed=3.5))
+        self.assertEqual(self.native.read_bytes(), self.controller.native_original)
+        self.assertEqual(self.bundle.read_bytes(), self.controller.bundle_original)
+
+    def test_legacy_ammo_patch_is_recognized_and_migrated(self):
+        offset = next(o for f, o, b, a in panel.PATCHES if f == "ammo" and o == 24285869)
+        legacy = bytearray(self.controller.native_original)
+        legacy[offset:offset + 3] = b"\x90" * 3
+        self.assertFalse(self.controller.decode_native(bytes(legacy))["ammo"])
+        self.native.write_bytes(bytes(legacy))
+        with patch.object(panel, "game_running", return_value=False):
+            self.assertTrue(self.controller.apply(dict(ammo=True, speed=1))["ammo"])
+        native, _ = self.controller.build(dict(ammo=True, speed=1))
+        self.assertEqual(self.native.read_bytes(), native)
+
+    def test_partial_patch_reads_as_off(self):
+        data = bytearray(self.controller.native_original)
+        _, offset, _, after = next(p for p in panel.PATCHES if p[0] == "drone")
+        data[offset:offset + len(after)] = after
+        self.assertFalse(self.controller.decode_native(bytes(data))["drone"])
 
 if __name__ == "__main__":
     unittest.main()

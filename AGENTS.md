@@ -16,7 +16,8 @@ Read this guide before adding a feature or changing compatibility data. It recor
 
 | File | Responsibility |
 | --- | --- |
-| `control_panel.py` | Supported hashes, patch sites, swimming asset identification, GUI, validation and guarded writes |
+| `dave_profile.py` | Supported hashes, patch sites (`PATCHES`), swimming asset identity, backup paths and Steam game discovery; no GUI dependency |
+| `control_panel.py` | GUI, validation, atomic guarded writes and rollback |
 | `inspect_dave.py` | Addressables lookup, UnityFS/LZ4 reading and rebuilding, serialized type trees, metadata enum analysis |
 | `prepare_backups.py` | Local original-backup preparation; never downloads game files |
 | `gui_language.py` | GUI translations, including application-generated error messages |
@@ -96,7 +97,7 @@ All record widths, header layouts and token associations must be revalidated aft
 Useful commands:
 
 ```powershell
-python inspect_dave.py --game 'D:/SteamLibrary/steamapps/common/Dave the Diver' --find PlayerGroup.prefab
+python inspect_dave.py --find PlayerGroup.prefab   # add --game 'PATH' if Steam detection fails
 python inspect_dave.py --bundle 'PATH/TO/CANDIDATE.bundle'
 python inspect_dave.py --bundle 'PATH/TO/CANDIDATE.bundle' --extract 'NEW-SCRATCH-DIRECTORY'
 python inspect_dave.py --serialized 'PATH/TO/EXTRACTED-CAB-FILE'
@@ -158,7 +159,7 @@ Names and signatures narrow the search; disassembly establishes what the code ch
 
 ### Current native patch map (historical supported build only)
 
-The authoritative implementation is `PATCHES` in `control_panel.py`. Values below are raw **DLL file offsets**, in decimal. Always check the original SHA and exact preimage bytes before using them.
+The authoritative implementation is `PATCHES` in `dave_profile.py`. Values below are raw **DLL file offsets**, in decimal. Always check the original SHA and exact preimage bytes before using them.
 
 | Feature/site | Offset | Original bytes | Enabled bytes |
 | --- | ---: | --- | --- |
@@ -184,7 +185,7 @@ Reference MethodDef tokens from this build include `DecreaseBullet` `0x06003754`
 ## Adding a GUI option without breaking other features
 
 1. Establish and document a guarded asset/native change as above. Do not connect an unverified guess to a success claim.
-2. Add a distinct feature key and original/enabled byte ranges in `PATCHES`, or a separately validated asset transformation. Check for overlapping ranges.
+2. Add a distinct feature key and original/enabled byte ranges in `PATCHES` (`dave_profile.py`), or a separately validated asset transformation. `test_source` rejects overlapping or same-length-mismatched ranges.
 3. Update the decoder's option state, `build`, `apply` read-back verification, `Panel` variables/widgets, `set_state`, Apply and Restore. Keep native normalization able to reconstruct the exact clean SHA.
 4. Add Traditional Chinese and English strings and explain the feature's coverage and existing-zero behavior.
 5. Test all relevant on/off combinations, preserving oxygen and existing switches. An enabled switch must not alter unrelated ranges; disabling must restore the exact original bytes.
@@ -201,7 +202,7 @@ Treat a Steam update or hash mismatch as **unsupported until re-investigated**. 
 5. Rediscover native code-generation-module pointers and method bodies for the correct assembly. Recheck every original instruction, field layout, control-flow dependency, inlined copy and alternate path. Do not port offsets by adding one global delta.
 6. Rediscover the player's asset references through the new catalog and serialized objects. Bundle filenames, CAB names, path IDs, external indexes, field layouts and original float values may all change. Recheck catalog CRC/loading settings.
 7. Build new copies and verify them. For maintainability, introduce a build-profile structure if supporting multiple versions: clean hashes, metadata/Unity/Steam versions, bundle/node/object identity, guarded field locations and native preimages belong together.
-8. Update `control_panel.py`, `prepare_backups.py` and relevant inspector assumptions consistently. Preserve the unknown-version rejection. Do not accept arbitrary hashes or silently migrate one build's modified file into another build's profile.
+8. Update `dave_profile.py`, `control_panel.py`, `prepare_backups.py` and relevant inspector assumptions consistently. Preserve the unknown-version rejection. Do not accept arbitrary hashes or silently migrate one build's modified file into another build's profile.
 9. Test a fresh setup, each switch, combinations, Restore and rollback using new-build backups. Then perform controlled gameplay checks. A title-screen launch alone is insufficient.
 10. Publish the supported build and the level of verification in README and this document. Keep prior-build support explicit or clearly mark it unsupported.
 
