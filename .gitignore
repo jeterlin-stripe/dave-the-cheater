@@ -1,0 +1,12 @@
+# Source allowlist: never commit game binaries, backups, reports or preferences.
+/*
+!/.gitignore
+!/README.md
+!/GUI-使用說明.md
+!/control_panel.py
+!/gui_language.py
+!/inspect_dave.py
+!/prepare_backups.py
+!/test_control_panel.py
+!/test_source.py
+!/Start-Dave-Controls.cmd
