@@ -73,6 +73,8 @@ Source checks need no game files. File-integration tests skip unless original ba
 
 ## Files
 
+For parameter discovery, adding features, and remapping after game updates, read [AGENTS.md](AGENTS.md).
+
 - `control_panel.py`: GUI and guarded file updates.
 - `gui_language.py`: translations.
 - `inspect_dave.py`: UnityFS/LZ4/Addressables/serialized-asset inspection and rebuilding.

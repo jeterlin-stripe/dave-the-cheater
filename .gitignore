@@ -2,6 +2,7 @@
 /*
 !/.gitignore
 !/README.md
+!/AGENTS.md
 !/GUI-使用說明.md
 !/control_panel.py
 !/gui_language.py
