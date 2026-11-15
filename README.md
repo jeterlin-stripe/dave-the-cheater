@@ -4,17 +4,19 @@ A Windows GUI for a supported Steam installation of **DAVE THE DIVER**, using Py
 
 ## GUI preview
 
-![Dave the Cheater GUI with English controls, feature switches, speed multiplier and Steam launch button](docs/images/gui.png)
+![Dave the Cheater GUI with English controls, four feature switches, swimming and sushi-bar speed multipliers with presets, status bar and action buttons](docs/images/gui.png)
 
 The top-right language selector switches between **English** and **繁體中文**.
 
 ## Features
 
 - Swimming speed multiplier, 0.1x to 20x.
-- Infinite ammo, invincibility and infinite cargo-drone switches.
+- Sushi bar movement speed multiplier, 0.1x to 10x, adjustable live while the game runs (Dave's walking, running and tired speed while serving).
+- Infinite oxygen, infinite ammo, invincibility and infinite cargo-drone switches.
+- Underwater weapon selector: equip any base-game weapon mid-dive from a searchable list.
 - Traditional Chinese / English UI with remembered language preference.
-- Steam launch button, highlighted success status, original-file restore, running-game checks, version validation and failed-write rollback.
-- Preserve the current oxygen patch when applying other controls.
+- Steam launch button, colour-coded status bar, original-file restore, running-game checks, version validation and failed-write rollback.
+- Keyboard shortcuts: **Ctrl+S** applies settings, **F5** reloads them from the game files.
 
 **Close the game before applying settings and restart afterward.** Switches do not modify files until Apply settings is clicked.
 
@@ -42,34 +44,35 @@ python control_panel.py
 
 1. **Close DAVE THE DIVER completely.** Steam can remain open.
 2. Open **Start-Dave-Controls.cmd**, or run `python control_panel.py`.
-3. Click **Game folder** and select the folder containing `DaveTheDiver.exe`.
+3. Check the **Game folder** path; click **Browse…** to select the folder containing `DaveTheDiver.exe` if it differs.
 4. Choose **English** or **繁體中文** from the top-right language selector.
-5. Enable or disable **Infinite ammo**, **Invincible**, and **Infinite cargo drone**. A checked, teal button means enabled.
-6. Enter a **Swimming speed multiplier**, such as `3.5`. `1` restores normal swimming speed; the allowed range is `0.1`–`20`.
-7. Click **Apply settings**. Wait for the green, bold success message confirming the files were written and checked.
+5. Enable or disable **Infinite oxygen**, **Infinite ammo**, **Invincible** and **Infinite cargo drone**. A checked, teal button means enabled.
+6. Enter a **Swimming speed multiplier** such as `3.5`, or click a preset (`1×`, `2×`, `3.5×`, `5×`). `1` restores normal swimming speed; the allowed range is `0.1`–`20`. To use the sushi bar speed, tick **Enable live sushi bar speed** before applying.
+7. Click **Apply settings**. It turns amber while there are unapplied changes. Wait for the green success message confirming the files were written and checked.
 8. Click **Launch game** to start through Steam, then test the changes in-game.
 
 Editing a field or switch does not apply it automatically. If you launch with unapplied changes, the GUI asks whether to use the previously applied settings. A running game blocks file changes.
 
-**Read current settings** reloads the actual file settings. **Restore all defaults** restores the original game files, disables the feature patches (including oxygen), and returns speed to `1`. Normal Apply settings preserves the existing oxygen-patch state.
+The status bar above the buttons is shared by both tabs: green means success, amber means unapplied changes or a waiting step, red means an error. **Reload** rereads the actual file settings. **Restore all defaults** restores the original game files, disables every patch including oxygen and the weapon selector, and returns swimming speed to `1`.
 
 If ammo or drone uses are already zero, you may need to refill or start a new dive first. See [繁體中文操作說明](GUI-使用說明.md) for the Chinese guide.
 
 ## Scope and verification
 
-### Experimental Weapons tab
+### Weapons tab
 
-Equipping a weapon mid-dive and swapping to it has been **tested in game** on the supported build. It is separate from the ordinary offline switches. It lists base-game guns, harpoons, harpoon heads and melee weapons from your own local data, one entry per weapon at its highest level, including weapons not carried on the current dive; DLC weapons are not currently included.
+Equipping a weapon mid-dive and swapping to it has been **tested in game** on the supported build. The list comes from your own local data: base-game guns, harpoons, harpoon heads and melee weapons, one entry per weapon at its highest level, including weapons not carried on the current dive; DLC weapons are not currently included. It loads automatically in the background when the panel opens. Weapon names are the game's own official names in the panel language (Traditional Chinese or English), read from your local text tables; search accepts either language. Each row also shows the weapon's in-game icon, and the bar above the status line shows the selected weapon's larger icon next to **Equip selected weapon**. Names and icons come from your own game files: the first load takes about ten seconds, after which they are cached in the ignored local file `weapon-names-cache.json` and folder `weapon-icons/`. Harpoon guns and the dive knife have no item icon in the game data, so they are listed without one.
 
-1. Close the game and open **Weapons (experimental)**.
-2. Enable the selector and click **Apply settings**, then start the game.
-3. During a dive, click **Load local weapon catalogue**, choose a weapon and click **Queue selected weapon while diving**.
+1. With the game closed, open **Weapons**, tick **Enable weapon selector** and click **Apply settings**. The badge on the right shows whether the selector is installed in the game files.
+2. Start the game and begin a dive.
+3. Pick a category tab or use **Search**, then click **Equip selected weapon** (or double-click it, or press Enter). The tabs group guns by the game's own families (Underwater Rifle, Triple Axel, Sniper Rifle, Tranquilizer Gun / Hush Darts, Grenade Launcher, Sticky Bomb Gun, Net Gun, Ice Gun), followed by harpoon guns, harpoon tips and melee weapons, each with a count.
 4. Return to the game and press your **weapon-switch key** (Tab by default) once to equip it, then again to swap between the harpoon and the new gun.
-5. Optionally click **Check equip result**: it reads the game's `Player.log` for a mid-dive weapon load.
+
+After queueing, the panel watches the game's `Player.log` for up to three minutes and turns the weapon status green once the game has loaded the weapon. Your last selected weapon is remembered.
 
 Only the first key press after each queue equips; every other press is the game's normal harpoon/gun swap. Queueing writes only a four-byte weapon ID into unused read/write memory; the game's own input handler performs the equip on its thread. No game code is modified at runtime, and no remote thread or external mod loader is used. Disable the selector and apply while the game is closed to restore the original file.
 
-Swimming speed does not adjust sushi-restaurant walking speed. Ammo targets shared diving-gun logic and its inlined decrement; coverage is not verified for every DLC, special weapon or minigame. Empty guns may need one refill.
+Swimming speed does not adjust sushi-restaurant walking speed; that is the separate sushi bar multiplier. After **Enable live sushi bar speed** has been applied once with the game closed, the multiplier box takes effect immediately while the game runs: the panel writes only a four-byte value into unused read/write memory, and the badge shows **Active in game**. The game itself always starts at 1×; while the panel is open it reapplies your remembered value automatically after each launch. It scales the walk, run and tired multipliers Dave uses in the main sushi bar, the event variant and the Jungle DLC restaurant; it does not change hired staff, customers or village walking. It is statically verified and file-tested, but not yet confirmed in game. Ammo targets shared diving-gun logic and its inlined decrement; coverage is not verified for every DLC, special weapon or minigame. Empty guns may need one refill.
 
 The cargo-drone option stops four identified use-count decrements in net/cargo interactions. It does not unlock the drone or refill empty counts; a new dive may be needed. Invincibility targets damage immunity and hit damage; scripted deaths remain unverified.
 

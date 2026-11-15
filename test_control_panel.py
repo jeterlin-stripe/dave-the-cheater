@@ -34,7 +34,7 @@ class ControlsTest(unittest.TestCase):
             for factor in [0.1, 3.5, 20]:
                 settings = dict(ammo=ammo, invincible=invincible, oxygen=oxygen, speed=factor)
                 native, bundle = self.controller.build(settings)
-                self.assertEqual(self.controller.decode_native(native), {**{k: settings[k] for k in ["ammo", "invincible", "oxygen"]}, "drone": False, "weapon_enabled": False, "weapon_id": panel.weapons.DEFAULT_ITEM})
+                self.assertEqual(self.controller.decode_native(native), {**{k: settings[k] for k in ["ammo", "invincible", "oxygen"]}, "drone": False, "weapon_enabled": False, "weapon_id": panel.weapons.DEFAULT_ITEM, "sushi_live": False})
                 self.bundle.write_bytes(bundle)
                 self.assertAlmostEqual(self.controller.decode_bundle()[0], factor, places=5)
 
@@ -56,7 +56,7 @@ class ControlsTest(unittest.TestCase):
                     expected[offset:offset + len(after)] = after
             self.assertEqual(on, bytes(expected))
             state = self.controller.decode_native(on)
-            self.assertEqual(state, dict(ammo=ammo, invincible=invincible, oxygen=oxygen, drone=True, weapon_enabled=False, weapon_id=panel.weapons.DEFAULT_ITEM))
+            self.assertEqual(state, dict(ammo=ammo, invincible=invincible, oxygen=oxygen, drone=True, weapon_enabled=False, weapon_id=panel.weapons.DEFAULT_ITEM, sushi_live=False))
         with patch.object(panel, "game_running", return_value=False):
             self.controller.apply(dict(ammo=True, invincible=True, oxygen=True, speed=3.5, drone=True))
             self.assertTrue(self.controller.read()[0]["drone"])
@@ -123,6 +123,24 @@ class ControlsTest(unittest.TestCase):
         with patch.object(panel, "game_running", return_value=False):
             self.controller.apply(dict(ammo=False, invincible=False, oxygen=False, drone=False, speed=1, weapon_enabled=False))
         self.assertEqual(self.native.read_bytes(), self.controller.native_original)
+
+    def test_sushi_live_with_other_features_and_restore(self):
+        s = panel.sushi_speed
+        original = self.controller.native_original
+        self.assertEqual(original[s.OFFSET:s.OFFSET + s.LENGTH], s.ORIGINAL)
+        base = dict(ammo=True, invincible=True, oxygen=True, drone=True, speed=3.5, weapon_enabled=True)
+        without, _ = self.controller.build(base)
+        native, _ = self.controller.build({**base, "sushi_live": True})
+        state = self.controller.decode_native(native)
+        self.assertTrue(state["sushi_live"] and state["weapon_enabled"] and state["drone"] and state["oxygen"])
+        self.assertFalse(self.controller.decode_native(without)["sushi_live"])
+        changed = {i for i in range(len(native)) if native[i] != without[i]}
+        allowed = set(range(s.OFFSET, s.OFFSET + s.LENGTH)) | set(range(s.PDATA_END_OFFSET, s.PDATA_END_OFFSET + 4))
+        self.assertTrue(changed and changed <= allowed)
+        with patch.object(panel, "game_running", return_value=False):
+            self.assertTrue(self.controller.apply({**base, "sushi_live": True})["sushi_live"])
+            self.controller.apply(dict(ammo=False, invincible=False, oxygen=False, speed=1))
+        self.assertEqual(self.native.read_bytes(), original)
 
     def test_second_write_failure_rolls_back_first(self):
         real_open = Path.open

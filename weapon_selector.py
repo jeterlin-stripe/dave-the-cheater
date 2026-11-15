@@ -182,8 +182,12 @@ def equip_events(since, log=PLAYER_LOG):
     return events
 
 
-def extract_catalog(game, highest_only=True):
-    """Read only the user's local base-game equipment table; never distribute it."""
+def extract_catalog(game, highest_only=True, names_cache=None):
+    """Read only the user's local base-game equipment table; never distribute it.
+
+    Each row gets official per-language `names` when the local text table can be
+    read (optionally cached in the ignored local file `names_cache`).
+    """
     aa = Path(game) / "DaveTheDiver_Data/StreamingAssets/aa"
     _, matches = catalog_entries(aa / "catalog.json", "DR_GameData_Equipment.json")
     match = next(x for x in matches if x["internal_id"].endswith("/DR_GameData_Equipment.json"))
@@ -214,7 +218,7 @@ def extract_catalog(game, highest_only=True):
                         continue
                     key = row["ItemTextID"]
                     readable = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", key.removesuffix("_Name").replace("_", " "))
-                    result.append({"id": int(row["TID"]), "name": readable,
+                    result.append({"id": int(row["TID"]), "name": readable, "text_id": key, "icon": row.get("ItemIcon") or "",
                                    "level": row.get("ItemLevel", 0), "type": row["ItemType"]})
                 if not result or len({x["id"] for x in result}) != len(result):
                     raise ValueError("Invalid weapon catalogue")
@@ -226,18 +230,122 @@ def extract_catalog(game, highest_only=True):
                         if key not in best or (row["level"], row["id"]) > (best[key]["level"], best[key]["id"]):
                             best[key] = row
                     result = list(best.values())
+                try:
+                    texts = item_names(game, names_cache)
+                except Exception:
+                    texts = {}  # official names are optional; derived names still work
+                for row in result:
+                    official = texts.get(row["text_id"], {})
+                    row["names"] = {language: official.get(language) or row["name"] for language in TEXT_LANGUAGES}
+                    row["category"] = weapon_category(row)
+                    # Gun families use the game's own "<Family>_Type" labels (e.g. SniperGun_Type).
+                    family = texts.get(row["category"] + "_Type", {})
+                    row["category_names"] = {language: family.get(language, "") for language in TEXT_LANGUAGES}
                 return sorted(result, key=lambda x: (x["type"], x["name"], x["level"], x["id"]))
     raise ValueError("Local weapon catalogue not found")
 
 
-def arm_live(game, item_id, allowed_ids):
-    """Update ONLY a validated installed adapter operand in the exact game process.
+# Gun families as named by the game's "<Family>_Type" texts, matched against ItemTextID.
+# Order matters: the first token found wins (e.g. "Sleep_Sniper" is a sniper rifle,
+# "SleepGun" is the Hush Dart family).
+GUN_FAMILIES = [("ShotGun", "ShotGun"), ("Sniper", "SniperGun"), ("SleepGun", "SleepGun"),
+                ("GrenadeLauncher", "GrenadeLauncher"), ("StickyBombGun", "StickyBombGun"),
+                ("NetGun", "NetGun"), ("IceGun", "IceGun"), ("DrainGun", "DrainGun"), ("BasicRifle", "BasicRifle")]
+OTHER_CATEGORIES = {1: "Harpoon", 2: "HarpoonHead", 3: "Melee"}
 
-    Caller must first validate the complete on-disk files with Controller.read().
+
+def weapon_category(row):
+    """Category key: a gun family (BasicRifle, ShotGun, SniperGun, ...) or Harpoon/HarpoonHead/Melee."""
+    if row["type"] != 0:
+        return OTHER_CATEGORIES.get(row["type"], "Other")
+    text_id = row.get("text_id", "")
+    for token, family in GUN_FAMILIES:
+        if token in text_id:
+            return family
+    return "OtherGun"
+
+
+# GUI language -> column of the game's own text tables.
+TEXT_LANGUAGES = {"en": "english", "zh-TW": "chinesetraditional"}
+
+
+def item_names(game, cache=None):
+    """Official item names {ItemTextID: {gui language: text}} from the local InstanceItemText table.
+
+    Decompressing the text bundle takes seconds in pure Python, so the result can
+    be cached in a local JSON file keyed by the bundle paths, sizes and mtimes.
+    """
+    aa = Path(game) / "DaveTheDiver_Data/StreamingAssets/aa"
+    _, matches = catalog_entries(aa / "catalog.json", "InstanceItemText.asset")
+    match = next(x for x in matches if x["internal_id"].endswith("/InstanceItemText.asset"))
+    paths = [aa / "StandaloneWindows64" / dep.replace("\\", "/").split("/")[-1] for dep in match["dependencies"]]
+    key = [[str(path.resolve()), path.stat().st_size, path.stat().st_mtime_ns] for path in paths]
+    if cache is not None:
+        try:
+            stored = json.loads(Path(cache).read_text("utf8"))
+            if stored.get("key") == key and stored.get("languages") == TEXT_LANGUAGES and stored.get("names"):
+                return stored["names"]
+        except (OSError, ValueError, AttributeError):
+            pass
+    names = _read_item_names(paths)
+    if cache is not None:
+        try:
+            Path(cache).write_text(json.dumps({"key": key, "languages": TEXT_LANGUAGES, "names": names},
+                                              ensure_ascii=False), "utf8")
+        except OSError:
+            pass
+    return names
+
+
+def _read_item_names(paths):
+    marker = "InstanceItemText".encode("utf8")
+    for path in paths:
+        for name, data, flags in bundle_files(path)[1]:
+            if not flags & 4 or marker not in data:
+                continue
+            summary = serialized_summary(data)
+            for obj in summary["objects"]:
+                typ = summary["types"][obj["type_index"]]
+                # Only decode the one text table; the bundle holds many large ones.
+                if typ["class_id"] != 114 or marker not in bytes.fromhex(obj["hex"]):
+                    continue
+                fields = read_object_fields(typ, obj)
+                if not any(f["path"] == "root/WorksheetName" and f["value"] == "InstanceItemText" for f in fields):
+                    continue
+                names = {}
+                for field in fields:
+                    row = field["value"]
+                    if field["path"].startswith("root/dataArray/") and isinstance(row, dict) and "name" in row:
+                        names[row["name"]] = {language: str(row.get(column) or "").strip()
+                                              for language, column in TEXT_LANGUAGES.items()}
+                if not names:
+                    raise ValueError("Item text table is empty")
+                return names
+    raise ValueError("Item text table not found")
+
+
+def arm_live(game, item_id, allowed_ids):
+    """Queue a weapon in the exact game process after verifying the installed adapter.
+
     A successful return means queued, not that the game has equipped the item.
     """
     if item_id not in allowed_ids:
         raise ValueError("Weapon is not in the local catalogue")
+    live_write(game, SWITCH_RVA, SWITCH_LENGTH, decode_region, PENDING_RVA, struct.pack("<i", item_id),
+               "Enable the weapon selector while the game is closed, then restart")
+    return item_id
+
+
+def live_write(game, site_rva, site_length, site_ok, target_rva, payload, not_installed):
+    """Write `payload` to unused RW slack in the one running game, then read it back.
+
+    The process image and GameAssembly.dll paths must match `game`, and
+    `site_ok(bytes at site_rva)` must accept the installed patch (False -> not
+    installed; it may raise for unknown code). Only data is written; no code
+    page or protection is changed.
+    """
+    if not (DATA_END_RVA <= target_rva and target_rva + len(payload) <= NEXT_SECTION_RVA):
+        raise ValueError("Live write target is outside the unused .data slack")
     if ctypes.sizeof(ctypes.c_void_p) != 8:
         raise OSError("64-bit Python is required")
     game = Path(game).resolve()
@@ -329,15 +437,13 @@ def arm_live(game, item_id, allowed_ids):
                 raise OSError("Incomplete memory read")
             return buffer.raw
 
-        if not decode_region(read(module_base + SWITCH_RVA, SWITCH_LENGTH)):
-            raise ValueError("Enable the weapon selector while the game is closed, then restart")
+        if not site_ok(read(module_base + site_rva, site_length)):
+            raise ValueError(not_installed)
         # Plain data write into the RW slack after .data; no code is modified.
-        target = module_base + PENDING_RVA
-        payload = struct.pack("<i", item_id)
+        target = module_base + target_rva
         actual = ctypes.c_size_t()
-        check(k.WriteProcessMemory(handle, target, payload, 4, ctypes.byref(actual)))
-        if actual.value != 4 or read(target, 4) != payload:
-            raise OSError("Weapon selection write verification failed")
-        return item_id
+        check(k.WriteProcessMemory(handle, target, payload, len(payload), ctypes.byref(actual)))
+        if actual.value != len(payload) or read(target, len(payload)) != payload:
+            raise OSError("Live write verification failed")
     finally:
         k.CloseHandle(handle)

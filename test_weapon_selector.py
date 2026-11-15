@@ -160,6 +160,44 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(w.equip_events(since, log), ["GunWeaponHandler"])
             self.assertEqual(w.equip_events(0, log), ["GunWeaponHandler"])
 
+    def test_item_names_cache_is_keyed_to_bundle(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            game = Path(folder)
+            bundles = game / "DaveTheDiver_Data/StreamingAssets/aa/StandaloneWindows64"
+            bundles.mkdir(parents=True)
+            (bundles / "text.bundle").write_bytes(b"one")
+            match = {"internal_id": "Assets/X/InstanceItemText.asset", "dependencies": ["{R}/StandaloneWindows64/text.bundle"]}
+            names = {"Normal_BasicRifle_Name": {"en": "Basic Underwater Rifle", "zh-TW": "舊式水中步槍"}}
+            cache = game / "cache.json"
+            with patch.object(w, "catalog_entries", return_value=(None, [match])),                     patch.object(w, "_read_item_names", return_value=names) as reader:
+                self.assertEqual(w.item_names(game, cache), names)
+                self.assertEqual(w.item_names(game, cache), names)
+                self.assertEqual(reader.call_count, 1)  # second call served from the cache
+                (bundles / "text.bundle").write_bytes(b"changed")  # game update -> reread
+                w.item_names(game, cache)
+                self.assertEqual(reader.call_count, 2)
+                cache.write_text("not json", encoding="utf8")
+                self.assertEqual(w.item_names(game, cache), names)
+                self.assertEqual(reader.call_count, 3)
+
+    def test_weapon_categories(self):
+        cases = {
+            "Normal_BasicRifle_Name": "BasicRifle", "Empowered_Sleep_BasicRifle_01_Name": "BasicRifle",
+            "Empowered_QuatroShotGun_01_Name": "ShotGun", "Empowered_CincoShotGun_Name": "ShotGun",
+            "Normal_Sniper_Name": "SniperGun", "Empowered_Sleep_Sniper_01_Name": "SniperGun",
+            "Normal_SleepGun_Name": "SleepGun", "Empowered_SleepGun_Final_Name": "SleepGun",
+            "Empowered_Magnetic_GrenadeLauncher_01_Name": "GrenadeLauncher",
+            "Empowered_Mine_StickyBombGun_01_Name": "StickyBombGun", "Empowered_L_NetGun_Name": "NetGun",
+            "Empowered_Black_IceGun_Name": "IceGun", "Mystery_Name": "OtherGun",
+        }
+        for text_id, expected in cases.items():
+            self.assertEqual(w.weapon_category({"type": 0, "text_id": text_id}), expected, text_id)
+        self.assertEqual(w.weapon_category({"type": 1, "text_id": "Harpoon_OldHarpoonGun_Name"}), "Harpoon")
+        self.assertEqual(w.weapon_category({"type": 2, "text_id": "HarpoonHead_Sleep_Name"}), "HarpoonHead")
+        self.assertEqual(w.weapon_category({"type": 3, "text_id": "Melee_Chicken_Name"}), "Melee")
+
     def test_reject_unlisted_id_before_any_process_access(self):
         with patch.object(w.ctypes, "WinDLL") as api:
             with self.assertRaises(ValueError):

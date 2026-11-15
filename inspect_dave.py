@@ -317,6 +317,8 @@ def read_object_fields(typ, obj):
         if n["type"] == "common:840":
             value = r.take(r.unpack("i")).decode("utf8", "replace")
             r.align(4)
+        elif n["type"] == "common:894":  # TypelessData: int32 length + raw bytes
+            value = r.take(r.unpack("i"))
         elif n["type"] == "common:49":  # Array
             count = r.unpack("i")
             if not 0 <= count <= 1000000 or len(children) != 2:

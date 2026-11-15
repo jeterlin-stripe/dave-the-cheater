@@ -12,6 +12,10 @@
 !/test_source.py
 !/weapon_selector.py
 !/test_weapon_selector.py
+!/sushi_speed.py
+!/test_sushi_speed.py
+!/weapon_icons.py
+!/test_weapon_icons.py
 !/Start-Dave-Controls.cmd
 !/docs/
 /docs/*
