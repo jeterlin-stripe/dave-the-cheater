@@ -4,7 +4,7 @@ Read this guide before adding a feature or changing compatibility data. It recor
 
 ## Project boundaries
 
-- This is a Windows Steam, Python-standard-library tool. The GUI uses Tkinter; it edits files while the game is closed and does not inject into a running process.
+- This is a Windows Steam, Python-standard-library tool. The GUI uses Tkinter. General controls edit files while the game is closed. The user explicitly requested arbitrary underwater weapon selection: the experimental selector adds a closed-game, build-specific input adapter and a narrowly scoped live four-byte item selection. It does not inject a DLL or create a remote thread. Do not generalize that exception into unrestricted process edits.
 - Keep Traditional Chinese and English UI strings in sync through `gui_language.py`.
 - Keep file validation, original backups, running-game checks, read-back verification and rollback. Do not bypass them to make a new build appear supported.
 - Never commit game binaries, extracted assets, modified bundles, original backups, user preferences, installation reports or credentials. `.gitignore` is an allowlist; explicitly allow new source/documentation files when necessary.
@@ -22,6 +22,8 @@ Read this guide before adding a feature or changing compatibility data. It recor
 | `gui_language.py` | GUI translations, including application-generated error messages |
 | `test_control_panel.py` | Local-backup-dependent integration tests using temporary fixtures |
 | `test_source.py` | Checks that do not need game files |
+| `weapon_selector.py` | Experimental local weapon catalogue, input adapter and constrained live selection |
+| `test_weapon_selector.py` | Adapter encoding, control-flow, alignment and rejection tests |
 
 `inspect_dave.py --movement` and `--build-copy` investigate **DaveMoveDataData**, the earlier walking-related candidate. They are not the swimming-speed implementation used by the GUI. Do not mistake those commands for a verified swimming patch.
 
@@ -191,6 +193,35 @@ Reference MethodDef tokens from this build include `DecreaseBullet` `0x06003754`
 6. Update README, usage guide and this map. Add new source files to the repository allowlist; keep game-derived outputs ignored.
 
 ## Game updates: remapping is required, not just new hashes
+
+### Experimental underwater weapon-selector map
+
+Root cause of the first (failed) attempt, found 2026-11-15: the adapter patched the standalone `PlayerCharacter.OnSwitchWeapon_Performed` (RVA `0x7CE530`), which **never runs**. The compiler inlined that method into `PlayerCharacter.OnDirectHandler`, the player input dispatcher. A full-DLL scan found no direct callers and no delegate-creation usage slot for the standalone method, while the lambda `<OnSwitchWeapon_Performed>b__897_0` MethodInfo slot (`0x187895050`) is referenced from both the standalone body and an identical block in `OnDirectHandler`. `Player.log` confirmed it: no `*WeaponHandler:EquipItem` load occurred after dive start-up during the Tab tests. Same lesson as the ammo `FireWeapon` inlining: check for inlined copies.
+
+The user's requested scope includes weapons not carried on the current dive. `InGameMetaGunSystem.ChangeWeaponBySlot` only selects slots; it is not a general weapon grant API. The inspected `InstanceItemInventory.CheatEquip` entry is a **no-op stub**, despite its promising name. Do not invoke it or claim it works.
+
+`InstanceItemInventory.DirectEquip(itemID)` = `StoreInstanceItem(itemID, false)` then tail-call `EquipItem(itemID, true)`. `EquipItem` stores the slot and, when the slot's handler (`[inventory+0x30]` type 0, `+0x28` types 1/2, `+0x20` type 3) is alive, calls the handler's virtual `EquipItem(SpecDataBase, bool)` so the live weapon is rebuilt.
+
+Version history: v1 patched the uncalled standalone method (no effect). v2 patched the inlined block and called DirectEquip on every press; the user confirmed on 2026-11-15 that the weapon changed in a dive, but Tab had replaced the game's own harpoon/gun swap, so the new gun could not be selected. v3 (current) equips once per queue and otherwise performs the normal swap.
+
+Supported-build constants in `weapon_selector.py` (v3):
+
+- Patch site: the inlined SwitchWeapon block in `OnDirectHandler`, RVA **0x7C864C** to **0x7C86FC** (176 bytes), raw file offset **8156236** (il2cpp section: raw = RVA - 0x1200). It is entered only after `call 0x182dc1960` with action index `0xe` / `je 0x7C86FC` at RVA `0x7C8646`; no other branch targets its interior. `rdi` = PlayerCharacter, `rsi` = input context; the code at `0x7C86FC` reloads `r8`/`edx`/`rcx` and does not depend on `rbx` from this block.
+- Pending-weapon slot: RVA **0x7F41FF0**, a dword in the unused slack between `.data`'s VirtualSize end (`0x7F415A0`) and `.pdata` (`0x7F42000`). That page is mapped with `.data`'s RW protection and the slack is zero at load, so nothing is pending at game start.
+- Adapter: `mov edx,[pending]`; if 0, or `[rdi+0x2a0]` (PlayerCharacter.m_InstanceItemInven) is null, `mov rcx,rdi; call OnSwitchWeapon_Performed` (standalone RVA **0x7CE530**, restored to original bytes; verified instruction-equivalent to the inlined block apart from prologue/register order). Otherwise clear the slot and `call DirectEquip(inventory, id, null)`. Both paths `jmp 0x7C86FC`.
+- `DirectEquip`: MethodDef `0x0600583e`, RVA **25998240**.
+- Migration: the v1 adapter (raw offset 8180528) and the v2 adapter at the site are recognised in files only so existing installs can be read; Apply always restores original bytes and writes v3. Live queueing refuses anything but the exact v3 adapter.
+- Live queueing verifies the process/module paths, the exact adapter and catalogue membership, then writes only the four-byte pending slot (plain data write; no code page or protection change). Read-back means queued, not equipped.
+- Equip confirmation: `equip_events()` reads `Player.log` after the queue position and reports `*WeaponHandler:EquipItem` stack traces that did not come from `EquipSavedSlotData` (dive start-up). The GUI exposes it as "Check equip result".
+- The file no longer stores a weapon ID; `weapon_id` in decoded settings is always `DEFAULT_ITEM`.
+
+Status 2026-11-15: user confirmed in game that v3 works: a queued weapon is equipped by the next weapon-switch press, and later presses swap between the harpoon and the new gun. The catalogue lists only the highest level of each weapon (`extract_catalog(highest_only=True)`, grouped by type and derived name); queue success is shown in the GUI status line only, errors still use dialogs.
+
+The weapon list is extracted locally from `DR_GameData_Equipment`'s `EquipmentItem` table. Follow its catalog dependency, find the TextAsset by name and parse `EquipmentItem@/` with `JSONDecoder.raw_decode`. Current catalogue filters: `ItemType` 0/1/2/3, `DLCType == 0`, valid ItemScriptableID and ItemTextID. Names are derived from identifiers, not official localized display strings. There are 451 entries in the inspected base-game table, including levels. Never commit the extracted table/catalogue.
+
+Status: offline byte/flow/restore tests pass; gameplay equip behavior remains unverified until a controlled dive test succeeds. Verify keyboard binding availability, free-control state, animations, ammo/UI refresh and save effects before expanding support. Do not force-use during transitions/QTEs or claim every possible weapon/DLC works. The native callback rewrite, inventory field offset, method RVA, catalogue schema and live-write preconditions all require remapping after an update.
+
+### Update procedure
 
 Treat a Steam update or hash mismatch as **unsupported until re-investigated**. Do not apply the old offsets or merely replace the expected hashes to suppress the guard.
 

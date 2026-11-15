@@ -57,6 +57,18 @@ If ammo or drone uses are already zero, you may need to refill or start a new di
 
 ## Scope and verification
 
+### Experimental Weapons tab
+
+Equipping a weapon mid-dive and swapping to it has been **tested in game** on the supported build. It is separate from the ordinary offline switches. It lists base-game guns, harpoons, harpoon heads and melee weapons from your own local data, one entry per weapon at its highest level, including weapons not carried on the current dive; DLC weapons are not currently included.
+
+1. Close the game and open **Weapons (experimental)**.
+2. Enable the selector and click **Apply settings**, then start the game.
+3. During a dive, click **Load local weapon catalogue**, choose a weapon and click **Queue selected weapon while diving**.
+4. Return to the game and press your **weapon-switch key** (Tab by default) once to equip it, then again to swap between the harpoon and the new gun.
+5. Optionally click **Check equip result**: it reads the game's `Player.log` for a mid-dive weapon load.
+
+Only the first key press after each queue equips; every other press is the game's normal harpoon/gun swap. Queueing writes only a four-byte weapon ID into unused read/write memory; the game's own input handler performs the equip on its thread. No game code is modified at runtime, and no remote thread or external mod loader is used. Disable the selector and apply while the game is closed to restore the original file.
+
 Swimming speed does not adjust sushi-restaurant walking speed. Ammo targets shared diving-gun logic and its inlined decrement; coverage is not verified for every DLC, special weapon or minigame. Empty guns may need one refill.
 
 The cargo-drone option stops four identified use-count decrements in net/cargo interactions. It does not unlock the drone or refill empty counts; a new dive may be needed. Invincibility targets damage immunity and hit damage; scripted deaths remain unverified.
@@ -79,6 +91,7 @@ For parameter discovery, adding features, and remapping after game updates, read
 - `gui_language.py`: translations.
 - `inspect_dave.py`: UnityFS/LZ4/Addressables/serialized-asset inspection and rebuilding.
 - `prepare_backups.py`: validate and prepare local original backups.
+- `weapon_selector.py`: experimental underwater weapon selector and local catalogue reader.
 - `test_source.py`, `test_control_panel.py`: source and file-integration tests.
 
 Unofficial tool, not affiliated with the game's developer or publisher. No game assets or full game binaries are included.

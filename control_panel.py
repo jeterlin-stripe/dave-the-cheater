@@ -1,17 +1,19 @@
-"""Local file-based DAVE controls. Python standard library only; no injection."""
+"""DAVE controls with guarded file patches and an experimental weapon selector."""
 import ctypes
 from ctypes import wintypes
 import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import struct
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from inspect_dave import bundle_files, write_bundle
-from gui_language import translate
+from gui_language import translate, TRANSLATIONS
+import weapon_selector as weapons
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_GAME = Path(r"G:\SteamLibrary\steamapps\common\Dave the Diver")
@@ -88,7 +90,7 @@ class Controller:
         self.info, self.original_nodes = bundle_files(self.bundle_original_path)
 
     def decode_native(self, data):
-        normalized = bytearray(data)
+        normalized, weapon_enabled = weapons.normalize_native(data, self.native_original)
         values = {"ammo": [], "oxygen": [], "invincible": [], "drone": []}
         for feature, offset, before, after in PATCHES:
             current = data[offset:offset + len(before)]
@@ -99,7 +101,8 @@ class Controller:
             normalized[offset:offset + len(before)] = before
         if digest(normalized) != NATIVE_HASH:
             raise ValueError("遊戲程式已有更新或其他修改；本工具拒絕覆寫。")
-        return {feature: all(states) for feature, states in values.items()}
+        return {**{feature: all(states) for feature, states in values.items()},
+                "weapon_enabled": weapon_enabled, "weapon_id": weapons.DEFAULT_ITEM}
 
     def decode_bundle(self):
         raw = self.bundle_path.read_bytes()
@@ -138,6 +141,9 @@ class Controller:
         for feature, offset, before, after in PATCHES:
             if settings.get(feature, False):
                 native[offset:offset + len(after)] = after
+        if settings.get("weapon_enabled", False):
+            selected = weapons.adapter()  # weapon choice is queued live, not stored in the file
+            native[weapons.SWITCH_OFFSET:weapons.SWITCH_OFFSET + len(selected)] = selected
         if factor == 1:
             bundle = self.bundle_original
         else:
@@ -192,6 +198,8 @@ class Controller:
         verified, _, _ = self.read()
         if any(verified[key] != bool(settings.get(key, False)) for key in ("ammo", "oxygen", "invincible", "drone")) or not math.isclose(verified["speed"], float(settings["speed"]), rel_tol=1e-6):
             raise OSError("讀回的設定與預期不同。請先不要啟動遊戲。")
+        if verified["weapon_enabled"] != bool(settings.get("weapon_enabled", False)):
+            raise OSError("讀回的設定與預期不同。請先不要啟動遊戲。")
         # A log failure must not make a successful game-file update look like a failed one.
         try:
             (HERE / "gui-last-settings.json").write_text(json.dumps({"game": str(self.game), **verified}, indent=2), encoding="utf8")
@@ -213,12 +221,18 @@ class Panel(tk.Tk):
         self.localized_texts = []
         self.raw_status = "正在讀取目前設定…"
         self.title(translate("Dave the Cheater", self.language))
-        self.geometry("760x650")
-        self.minsize(740, 630)
+        self.geometry("800x740")
+        self.minsize(760, 720)
         self.configure(bg="#101b2a")
         self.path = tk.StringVar(value=str(DEFAULT_GAME))
         self.ammo, self.invincible = tk.BooleanVar(), tk.BooleanVar()
         self.drone = tk.BooleanVar()
+        self.weapon_enabled = tk.BooleanVar()
+        self.weapon_catalog = []
+        self.weapon_choice = tk.StringVar()
+        self.installed_weapon_id = weapons.DEFAULT_ITEM
+        self.queue_log_position = None
+        self.weapon_status = tk.StringVar()
         self.speed = tk.StringVar(value="3.5")
         self.oxygen = True
         self.loaded = False
@@ -227,6 +241,8 @@ class Panel(tk.Tk):
         style = ttk.Style(self)
         style.theme_use("clam")
         style.configure("TFrame", background="#101b2a")
+        style.configure("TNotebook", background="#101b2a", borderwidth=0)
+        style.configure("TNotebook.Tab", padding=(16, 8))
         style.configure("TLabel", background="#101b2a", foreground="#e7f1ff", font=("Microsoft JhengHei UI", 10))
         style.configure("Title.TLabel", font=("Segoe UI", 23, "bold"), foreground="#65d5ee")
         style.configure("Status.TLabel", background="#101b2a", foreground="#e7f1ff", padding=10)
@@ -248,6 +264,14 @@ class Panel(tk.Tk):
         row.pack(fill="x")
         ttk.Entry(row, textvariable=self.path).pack(side="left", fill="x", expand=True)
         ttk.Button(row, textvariable=self.localized("選擇遊戲資料夾"), command=self.browse).pack(side="right", padx=(8, 0))
+        self.notebook = ttk.Notebook(body)
+        self.notebook.pack(fill="both", expand=True, pady=(16, 0))
+        options_tab = ttk.Frame(self.notebook, padding=10)
+        self.weapon_tab = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(options_tab, text=self.tr("一般設定"))
+        self.notebook.add(self.weapon_tab, text=self.tr("武器（實驗性）"))
+        self.build_weapon_tab()
+        body = options_tab
         switches = ttk.Frame(body)
         switches.pack(fill="x", pady=18)
         ttk.Checkbutton(switches, textvariable=self.localized("無限彈藥"), variable=self.ammo, style="Switch.TCheckbutton", command=self.dirty).pack(side="left", fill="x", expand=True, padx=(0, 8))
@@ -286,6 +310,7 @@ class Panel(tk.Tk):
         self.status.set(self.tr(source))
         success = source in ("套用成功，已讀回核對。請重新啟動遊戲。", "已還原全部原始檔案，並完成核對。")
         self.status_label.configure(style="SuccessStatus.TLabel" if success else "Status.TLabel")
+        self.weapon_apply_status_label.configure(style="SuccessStatus.TLabel" if success else "Status.TLabel")
 
     @staticmethod
     def error_source(error):
@@ -295,7 +320,11 @@ class Panel(tk.Tk):
             return "無法存取檔案，請確認檔案未被佔用且目前帳號有寫入權限。"
         if isinstance(error, ValueError) and "could not convert string to float" in str(error):
             return "倍率請輸入 0.1 至 20 之間的數字。"
-        return str(error)
+        text = str(error)
+        for source, english in TRANSLATIONS.items():
+            if english == text:
+                return source
+        return text
 
     def error_text(self, error):
         return self.tr(self.error_source(error))
@@ -306,6 +335,10 @@ class Panel(tk.Tk):
         for variable, source in self.localized_texts:
             variable.set(self.tr(source))
         self.status.set(self.tr(self.raw_status))
+        self.notebook.tab(0, text=self.tr("一般設定"))
+        self.notebook.tab(1, text=self.tr("武器（實驗性）"))
+        if hasattr(self, "raw_weapon_status"):
+            self.weapon_status.set(self.tr(self.raw_weapon_status))
         try:
             (HERE / "gui-preferences.json").write_text(json.dumps({"language": self.language}), encoding="utf8")
         except OSError:
@@ -336,6 +369,8 @@ class Panel(tk.Tk):
         selected = filedialog.askdirectory(title=self.tr("選擇含有 DaveTheDiver.exe 的資料夾"))
         if selected:
             self.path.set(selected)
+            self.weapon_catalog = []
+            self.weapon_combo.configure(values=())
             self.refresh()
 
     def set_state(self, state):
@@ -343,6 +378,9 @@ class Panel(tk.Tk):
         self.ammo.set(state["ammo"])
         self.invincible.set(state["invincible"])
         self.drone.set(state["drone"])
+        self.weapon_enabled.set(state.get("weapon_enabled", False))
+        if not self.weapon_choice.get():
+            self.weapon_choice.set(self.weapon_label(self.installed_weapon_id))
         self.speed.set(f"{state['speed']:.6g}")
         self.oxygen = state["oxygen"]
         self.loaded = True
@@ -362,12 +400,105 @@ class Panel(tk.Tk):
             controller = Controller(self.path.get())
             # Preserve actual oxygen state, even if the folder was edited manually.
             actual, _, _ = controller.read()
-            state = controller.apply({"ammo": self.ammo.get(), "invincible": self.invincible.get(), "drone": self.drone.get(), "speed": self.speed.get(), "oxygen": actual["oxygen"]})
+            if self.weapon_enabled.get() and not self.weapon_catalog:
+                self.load_weapons()
+                if not self.weapon_catalog:
+                    raise ValueError(self.tr("請先成功載入本機武器清單。"))
+            item_id = self.selected_weapon_id()
+            state = controller.apply({"ammo": self.ammo.get(), "invincible": self.invincible.get(), "drone": self.drone.get(), "speed": self.speed.get(), "oxygen": actual["oxygen"], "weapon_enabled": self.weapon_enabled.get(), "weapon_id": item_id})
             self.set_state(state)
             self.set_status("套用成功，已讀回核對。請重新啟動遊戲。")
         except Exception as error:
             self.set_status("未能套用；請查看錯誤訊息。")
             messagebox.showerror(self.tr("套用失敗"), self.error_text(error))
+
+    def build_weapon_tab(self):
+        body = self.weapon_tab
+        ttk.Label(body, textvariable=self.localized("水下武器選擇器"), font=("Microsoft JhengHei UI", 16, "bold")).pack(anchor="w", pady=(4, 12))
+        ttk.Label(body, textvariable=self.localized("第三版：潛水中換槍已實測成功；此版改為保留魚叉／槍械切換（待實測）。按鍵後可用「檢查裝備結果」確認。"), wraplength=700).pack(anchor="w", pady=(0, 12))
+        ttk.Checkbutton(body, textvariable=self.localized("啟用武器選擇器（改變切換武器按鍵用途）"), variable=self.weapon_enabled, command=self.dirty).pack(anchor="w", pady=8)
+        ttk.Label(body, textvariable=self.localized("啟用後，更新選定武器後的下一次「切換武器」按鍵會裝備該武器一次；其餘時候按鍵維持原本的魚叉／槍械切換。"), wraplength=700).pack(anchor="w", pady=(0, 16))
+        ttk.Button(body, textvariable=self.localized("載入本機武器清單"), command=self.load_weapons).pack(anchor="w")
+        self.weapon_combo = ttk.Combobox(body, textvariable=self.weapon_choice, state="readonly", width=70)
+        self.weapon_combo.pack(fill="x", pady=12)
+        ttk.Label(body, textvariable=self.localized("包含本機資料中的本篇槍械、魚叉、魚叉頭與近戰武器；不要求本次已攜帶。名稱由資料識別字產生。DLC 武器尚未納入。"), wraplength=700).pack(anchor="w", pady=(0, 16))
+        row = ttk.Frame(body); row.pack(fill="x", pady=4)
+        ttk.Button(row, textvariable=self.localized("套用設定"), command=self.apply).pack(side="left")
+        self.queue_button = ttk.Button(row, textvariable=self.localized("潛水中更新選定武器"), command=self.queue_weapon)
+        self.queue_button.pack(side="right")
+        self.check_button = ttk.Button(row, textvariable=self.localized("檢查裝備結果"), command=self.check_weapon_result)
+        self.check_button.pack(side="right", padx=8)
+        self.weapon_status_label = ttk.Label(body, textvariable=self.weapon_status, wraplength=700, style="Status.TLabel")
+        self.weapon_status_label.pack(fill="x", pady=8)
+        ttk.Label(body, textvariable=self.localized("潛水途中：選擇武器 → 更新選定武器 → 回到遊戲按一次「切換武器」鍵裝備 → 之後再按即可在魚叉與新槍之間切換。請在可自由操作、未射擊或播放動畫時使用。"), wraplength=700).pack(anchor="w", pady=16)
+        self.weapon_apply_status_label = ttk.Label(body, textvariable=self.status, wraplength=675, style="Status.TLabel")
+        self.weapon_apply_status_label.pack(fill="x", pady=8)
+
+    def weapon_label(self, item_id):
+        for row in self.weapon_catalog:
+            if row["id"] == item_id:
+                return f"{row['name']}  ·  Lv.{row['level']}  ·  #{row['id']}"
+        return f"#{item_id}"
+
+    def selected_weapon_id(self):
+        match = re.search(r"#(\d+)$", self.weapon_choice.get())
+        return int(match.group(1)) if match else self.installed_weapon_id
+
+    def weapon_message(self, source, success=False):
+        self.raw_weapon_status = source
+        self.weapon_status.set(self.tr(source))
+        self.weapon_status_label.configure(style="SuccessStatus.TLabel" if success else "Status.TLabel")
+
+    def load_weapons(self):
+        try:
+            Controller(self.path.get()).read()
+            selected = self.selected_weapon_id()
+            self.weapon_catalog = weapons.extract_catalog(self.path.get())
+            self.weapon_combo.configure(values=[self.weapon_label(row["id"]) for row in self.weapon_catalog])
+            if selected not in {row["id"] for row in self.weapon_catalog}:
+                # Only the highest level of each weapon is listed; fall back to the first entry.
+                selected = self.weapon_catalog[0]["id"]
+            self.weapon_choice.set(self.weapon_label(selected))
+            self.weapon_message("已載入本機武器清單。尚未變更遊戲中的武器。")
+        except Exception as error:
+            self.weapon_catalog = []
+            self.weapon_combo.configure(values=())
+            self.weapon_message(self.error_source(error))
+
+    def queue_weapon(self):
+        self.queue_button.configure(state="disabled")
+        self.weapon_message("正在檢查遊戲並更新武器選擇…")
+        self.update_idletasks()
+        try:
+            actual, _, _ = Controller(self.path.get()).read()
+            if not actual["weapon_enabled"]:
+                raise ValueError(self.tr("請先關閉遊戲並啟用武器選擇器，再重新啟動遊戲。"))
+            if not self.weapon_catalog:
+                raise ValueError(self.tr("請先成功載入本機武器清單。"))
+            position = weapons.log_position()
+            weapons.arm_live(self.path.get(), self.selected_weapon_id(), {row["id"] for row in self.weapon_catalog})
+            self.queue_log_position = position
+            source = "選擇已更新並讀回核對；請回到遊戲按「切換武器」鍵，再按「檢查裝備結果」。"
+            self.weapon_message(source, success=True)
+        except Exception as error:
+            self.weapon_message(self.error_source(error))
+            messagebox.showerror(self.tr("武器操作失敗"), self.error_text(error), parent=self)
+        finally:
+            self.queue_button.configure(state="normal")
+
+    def check_weapon_result(self):
+        if self.queue_log_position is None:
+            self.weapon_message("請先按「潛水中更新選定武器」，再回遊戲按切換武器鍵。")
+            return
+        try:
+            events = weapons.equip_events(self.queue_log_position)
+        except OSError as error:
+            self.weapon_message(self.error_source(error))
+            return
+        if events:
+            self.weapon_message("遊戲記錄顯示潛水中已重新裝備武器：" + "、".join(events), success=True)
+        else:
+            self.weapon_message("遊戲記錄中尚未出現潛水中的裝備動作。請確認已在遊戲中按切換武器鍵（預設 Tab）。")
 
     def restore(self):
         if not messagebox.askyesno(self.tr("還原原始設定"), self.tr("將還原原始速度、彈藥、無人機與受傷規則，也會關閉氧氣補丁。是否繼續？")):

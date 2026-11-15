@@ -10,6 +10,8 @@
 !/prepare_backups.py
 !/test_control_panel.py
 !/test_source.py
+!/weapon_selector.py
+!/test_weapon_selector.py
 !/Start-Dave-Controls.cmd
 !/docs/
 /docs/*
