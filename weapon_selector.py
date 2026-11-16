@@ -7,8 +7,12 @@ performs the game's normal harpoon/gun swap. No remote thread, injected DLL,
 code write or arbitrary-address UI is used at runtime.
 """
 import ctypes
-from ctypes import wintypes
+try:
+    from ctypes import wintypes  # Windows only; Linux uses steam_platform's /proc backend
+except (ImportError, ValueError):
+    wintypes = None
 import json
+import os
 from pathlib import Path
 import re
 import struct
@@ -346,6 +350,9 @@ def live_write(game, site_rva, site_length, site_ok, target_rva, payload, not_in
     """
     if not (DATA_END_RVA <= target_rva and target_rva + len(payload) <= NEXT_SECTION_RVA):
         raise ValueError("Live write target is outside the unused .data slack")
+    if os.name != "nt":  # Steam Deck / Linux: the game runs under Proton
+        import steam_platform
+        return steam_platform.linux_live_write(game, site_rva, site_length, site_ok, target_rva, payload, not_installed)
     if ctypes.sizeof(ctypes.c_void_p) != 8:
         raise OSError("64-bit Python is required")
     game = Path(game).resolve()

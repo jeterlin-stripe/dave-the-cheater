@@ -14,11 +14,17 @@
 !/test_weapon_selector.py
 !/sushi_speed.py
 !/test_sushi_speed.py
+!/live_multipliers.py
+!/test_live_multipliers.py
 !/weapon_icons.py
 !/test_weapon_icons.py
 !/Start-Dave-Controls.cmd
+!/Start-Dave-Controls.sh
+!/steam_platform.py
+!/test_steam_platform.py
 !/docs/
 /docs/*
 !/docs/images/
 /docs/images/*
 !/docs/images/gui.png
+!/docs/images/gui-weapons.png

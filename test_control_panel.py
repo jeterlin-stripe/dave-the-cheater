@@ -34,7 +34,7 @@ class ControlsTest(unittest.TestCase):
             for factor in [0.1, 3.5, 20]:
                 settings = dict(ammo=ammo, invincible=invincible, oxygen=oxygen, speed=factor)
                 native, bundle = self.controller.build(settings)
-                self.assertEqual(self.controller.decode_native(native), {**{k: settings[k] for k in ["ammo", "invincible", "oxygen"]}, "drone": False, "weapon_enabled": False, "weapon_id": panel.weapons.DEFAULT_ITEM, "sushi_live": False})
+                self.assertEqual(self.controller.decode_native(native), {**{k: settings[k] for k in ["ammo", "invincible", "oxygen"]}, "drone": False, "weapon_enabled": False, "weapon_id": panel.weapons.DEFAULT_ITEM, "sushi_live": False, "swim_live": False, "backpack_live": False})
                 self.bundle.write_bytes(bundle)
                 self.assertAlmostEqual(self.controller.decode_bundle()[0], factor, places=5)
 
@@ -56,7 +56,7 @@ class ControlsTest(unittest.TestCase):
                     expected[offset:offset + len(after)] = after
             self.assertEqual(on, bytes(expected))
             state = self.controller.decode_native(on)
-            self.assertEqual(state, dict(ammo=ammo, invincible=invincible, oxygen=oxygen, drone=True, weapon_enabled=False, weapon_id=panel.weapons.DEFAULT_ITEM, sushi_live=False))
+            self.assertEqual(state, dict(ammo=ammo, invincible=invincible, oxygen=oxygen, drone=True, weapon_enabled=False, weapon_id=panel.weapons.DEFAULT_ITEM, sushi_live=False, swim_live=False, backpack_live=False))
         with patch.object(panel, "game_running", return_value=False):
             self.controller.apply(dict(ammo=True, invincible=True, oxygen=True, speed=3.5, drone=True))
             self.assertTrue(self.controller.read()[0]["drone"])
@@ -141,6 +141,46 @@ class ControlsTest(unittest.TestCase):
             self.assertTrue(self.controller.apply({**base, "sushi_live": True})["sushi_live"])
             self.controller.apply(dict(ammo=False, invincible=False, oxygen=False, speed=1))
         self.assertEqual(self.native.read_bytes(), original)
+
+    def test_live_multipliers_with_other_features_and_restore(self):
+        live = panel.live
+        original = self.controller.native_original
+        base = dict(ammo=True, invincible=False, oxygen=True, drone=True, speed=1, weapon_enabled=True, sushi_live=True)
+        without, _ = self.controller.build(base)
+        for features in ({"swim_live"}, {"backpack_live"}, {"swim_live", "backpack_live"}):
+            native, _ = self.controller.build({**base, **{f: True for f in features}})
+            state = self.controller.decode_native(native)
+            for feature in panel.LIVE_FEATURES:
+                self.assertEqual(state[feature], feature in features)
+            self.assertTrue(state["sushi_live"] and state["weapon_enabled"] and state["drone"] and state["oxygen"])
+            changed = {i for i in range(len(native)) if native[i] != without[i]}
+            allowed = {rva - live.IL2CPP_DELTA + k for f in features for rva, before, _ in live.FEATURES[f] for k in range(len(before))}
+            self.assertTrue(changed and changed <= allowed)
+        with patch.object(panel, "game_running", return_value=False):
+            state = self.controller.apply({**base, "swim_live": True, "backpack_live": True})
+            self.assertTrue(state["swim_live"] and state["backpack_live"] and state["sushi_live"])
+            self.controller.apply(dict(ammo=False, invincible=False, oxygen=False, speed=1))
+        self.assertEqual(self.native.read_bytes(), original)
+        self.assertEqual(self.bundle.read_bytes(), self.controller.bundle_original)
+
+    def test_live_hook_sites_are_original_and_caves_are_padding(self):
+        """Every hook site holds its expected instruction; every routine lands in int3 padding outside .pdata."""
+        import bisect, struct
+        live = panel.live
+        data = self.controller.native_original
+        pdata_raw, pdata_size = 0x7C69C00, 0x4D29A4
+        entries = sorted(e for e in (struct.unpack_from("<III", data, pdata_raw + i * 12) for i in range(pdata_size // 12)) if e[0])
+        begins = [e[0] for e in entries]
+        for feature, regions in live.FEATURES.items():
+            for rva, before, after in regions:
+                self.assertEqual(data[rva - live.IL2CPP_DELTA:rva - live.IL2CPP_DELTA + len(before)], before)
+                if before == bytes([live.CC]) * len(before):
+                    index = bisect.bisect_right(begins, rva) - 1
+                    self.assertLessEqual(entries[index][1], rva)                        # after the previous function's unwind range
+                    following = begins[index + 1]
+                    self.assertLessEqual(rva + len(after), following)                  # before the next function
+                    self.assertEqual(data[rva - live.IL2CPP_DELTA:following - live.IL2CPP_DELTA],
+                                     bytes([live.CC]) * (following - rva))           # all padding up to it
 
     def test_second_write_failure_rolls_back_first(self):
         real_open = Path.open

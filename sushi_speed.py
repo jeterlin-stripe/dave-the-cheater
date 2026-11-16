@@ -109,5 +109,5 @@ def set_live(game, factor):
     import weapon_selector
     payload = slot_value(factor)
     weapon_selector.live_write(game, GETTER_RVA, LENGTH, is_installed, SLOT_RVA, payload,
-                               "Enable live sushi bar speed while the game is closed, then restart")
+                               "Enable live multipliers while the game is closed, then restart")
     return float(factor)

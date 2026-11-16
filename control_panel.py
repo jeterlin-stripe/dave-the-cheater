@@ -1,6 +1,9 @@
 """DAVE controls with guarded file patches and an underwater weapon selector."""
 import ctypes
-from ctypes import wintypes
+try:
+    from ctypes import wintypes  # Windows only
+except (ImportError, ValueError):
+    wintypes = None
 import hashlib
 import json
 import math
@@ -16,17 +19,21 @@ from inspect_dave import bundle_files, write_bundle
 from gui_language import translate, TRANSLATIONS
 import weapon_selector as weapons
 import sushi_speed
+import live_multipliers as live
 import weapon_icons
+import steam_platform
 
 HERE = Path(__file__).resolve().parent
 ICON_CACHE = HERE / "weapon-icons"  # local, git-ignored crops of the game's own item icons
 NAMES_CACHE = HERE / "weapon-names-cache.json"  # local, git-ignored copy of the game's own item names
-DEFAULT_GAME = Path(r"G:\SteamLibrary\steamapps\common\Dave the Diver")
+DEFAULT_GAME = steam_platform.find_game(fallback=Path(r"G:\SteamLibrary\steamapps\common\Dave the Diver") if steam_platform.IS_WINDOWS
+                                        else Path.home() / ".local/share/Steam/steamapps/common/Dave the Diver")
 NATIVE_HASH = "ed213c248bf53e62a3bf2223ff3f89467a6edff6cec7d3ea921ada6a6e2a6600"
 BUNDLE_HASH = "9800d47efc3d4106b1207530c92c0be6ecdda4647c378e4fc3d7aa662d93ea7e"
 BUNDLE_NAME = "7314e4d32b10a297b1b8f2c2d3fac26f.bundle"
 NODE_NAME = "CAB-3fc8e257bbfa28c753fb863c50d033ff"
 SPEED_OFFSET = 7500
+LIVE_FEATURES = ("swim_live", "backpack_live")
 PATCHES = [
     ("oxygen", 24359754, bytes.fromhex("f3440f58c6"), bytes.fromhex("9090909090")),
     ("ammo", 24285869, bytes.fromhex("83ea01"), bytes.fromhex("83ea00")),
@@ -46,7 +53,9 @@ def digest(data):
 
 
 def game_running():
-    """Enumerate all Windows processes, including outside this Python process tree."""
+    """Enumerate all processes (Windows API, or /proc for the Proton game on Linux/Steam Deck)."""
+    if not steam_platform.IS_WINDOWS:
+        return steam_platform.linux_game_running()
     class ProcessEntry(ctypes.Structure):
         _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
                     ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
@@ -97,6 +106,8 @@ class Controller:
     def decode_native(self, data):
         normalized, weapon_enabled = weapons.normalize_native(data, self.native_original)
         sushi_live = sushi_speed.normalize(normalized)
+        swim_live = live.normalize(normalized, "swim_live")
+        backpack_live = live.normalize(normalized, "backpack_live")
         values = {"ammo": [], "oxygen": [], "invincible": [], "drone": []}
         for feature, offset, before, after in PATCHES:
             current = data[offset:offset + len(before)]
@@ -108,7 +119,8 @@ class Controller:
         if digest(normalized) != NATIVE_HASH:
             raise ValueError("遊戲程式已有更新或其他修改；本工具拒絕覆寫。")
         return {**{feature: all(states) for feature, states in values.items()},
-                "weapon_enabled": weapon_enabled, "weapon_id": weapons.DEFAULT_ITEM, "sushi_live": sushi_live}
+                "weapon_enabled": weapon_enabled, "weapon_id": weapons.DEFAULT_ITEM, "sushi_live": sushi_live,
+                "swim_live": swim_live, "backpack_live": backpack_live}
 
     def decode_bundle(self):
         raw = self.bundle_path.read_bytes()
@@ -151,6 +163,8 @@ class Controller:
             selected = weapons.adapter()  # weapon choice is queued live, not stored in the file
             native[weapons.SWITCH_OFFSET:weapons.SWITCH_OFFSET + len(selected)] = selected
         sushi_speed.apply(native, settings.get("sushi_live", False))
+        for feature in LIVE_FEATURES:
+            live.apply(native, feature, settings.get(feature, False))
         if factor == 1:
             bundle = self.bundle_original
         else:
@@ -202,10 +216,10 @@ class Controller:
             if rollback_errors:
                 raise OSError("套用失敗，且自動還原不完整。請勿啟動遊戲。\n" + "\n".join(rollback_errors)) from error
             raise OSError(f"未能套用，已保留／還原先前版本。\n{error}") from error
-        verified, _, _ = self.read()
+        verified = self.read()[0]
         if any(verified[key] != bool(settings.get(key, False)) for key in ("ammo", "oxygen", "invincible", "drone")) or not math.isclose(verified["speed"], float(settings["speed"]), rel_tol=1e-6):
             raise OSError("讀回的設定與預期不同。請先不要啟動遊戲。")
-        if verified["weapon_enabled"] != bool(settings.get("weapon_enabled", False)) or verified["sushi_live"] != bool(settings.get("sushi_live", False)):
+        if any(verified[key] != bool(settings.get(key, False)) for key in ("weapon_enabled", "sushi_live", *LIVE_FEATURES)):
             raise OSError("讀回的設定與預期不同。請先不要啟動遊戲。")
         # A log failure must not make a successful game-file update look like a failed one.
         try:
@@ -224,9 +238,47 @@ WEAPON_CATEGORIES = ["", "BasicRifle", "ShotGun", "SniperGun", "SleepGun", "Gren
                      "NetGun", "IceGun", "DrainGun", "OtherGun", "Harpoon", "HarpoonHead", "Melee", "Other"]
 CATEGORY_LABELS = {"": "全部", "Harpoon": "魚叉槍", "HarpoonHead": "魚叉頭", "Melee": "近戰武器",
                    "OtherGun": "其他槍械", "Other": "其他"}
-UI_FONT = "Microsoft JhengHei UI"
+UI_FONT = "Microsoft JhengHei UI" if steam_platform.IS_WINDOWS else "Noto Sans CJK TC"
+NUMBER_FONT = "Segoe UI" if steam_platform.IS_WINDOWS else "Noto Sans"
 EQUIP_POLL_MS, EQUIP_POLL_LIMIT = 1000, 180
-SUSHI_NOTE = "Dave 在壽司店（含叢林 DLC 店面）走路、奔跑與疲累時的速度；1 = 原始速度，可輸入 0.1–10。遊戲執行中修改會立即生效，面板開著時重新啟動遊戲也會自動套用。"
+LIVE_NOTE = "勾選後在遊戲關閉時按一次「套用設定」；之後修改倍率會立即寫入執行中的遊戲（每次啟動從 1× 開始，面板開著時自動套用）。水下與壽司店速度立即生效；背包的撿取上限立即生效，畫面上的重量上限與變慢門檻在下次潛水更新。「無限」= 1000 倍。"
+
+
+class ScrollFrame(ttk.Frame):
+    """A tab body that fills the tab and gains a vertical scrollbar only when the tab is too short."""
+
+    def __init__(self, parent, padding, min_height=0, shrinkable=False):
+        super().__init__(parent)
+        # shrinkable: the content can squeeze down to min_height (the weapon list shrinks first)
+        self.min_height, self.shrinkable = min_height, shrinkable
+        self.canvas = tk.Canvas(self, background=BG, highlightthickness=0, borderwidth=0)
+        self.bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.bar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.body = ttk.Frame(self.canvas, padding=padding)
+        self.window = self.canvas.create_window(0, 0, window=self.body, anchor="nw")
+        self.canvas.bind("<Configure>", self.fit)
+        self.body.bind("<Configure>", self.fit)
+        self.scrolling = False
+
+    def fit(self, _event=None):
+        width, height = self.canvas.winfo_width(), self.canvas.winfo_height()
+        needed = self.min_height if self.shrinkable else max(self.body.winfo_reqheight(), self.min_height)
+        total = max(height, needed)
+        self.canvas.itemconfigure(self.window, width=width, height=total)
+        self.canvas.configure(scrollregion=(0, 0, width, total))
+        scrolling = needed > height + 1
+        if scrolling != self.scrolling:
+            self.scrolling = scrolling
+            if scrolling:
+                self.bar.pack(side="right", fill="y", before=self.canvas)
+            else:
+                self.bar.pack_forget()
+                self.canvas.yview_moveto(0)
+
+    def scroll(self, steps):
+        if self.scrolling:
+            self.canvas.yview_scroll(steps * 3, "units")
 
 
 class Panel(tk.Tk):
@@ -259,14 +311,25 @@ class Panel(tk.Tk):
         self.installed_label = tk.StringVar()
         self.queue_log_position = None
         self.equip_poll = None
-        self.speed = tk.StringVar(value="3.5")
-        self.sushi_live = tk.BooleanVar()
-        self.sushi_installed = False
-        self.sushi_speed = tk.StringVar(value=str(self.preferences.get("sushi_speed", "1")))
-        self.sushi_applied = None
-        self.sushi_sync_job = None
-        self.sushi_state = tk.StringVar()
-        self.raw_sushi_state = ("", "")
+        prefs = self.preferences
+        self.swim = tk.StringVar(value=str(prefs.get("swim_speed", "1")))
+        backpack_pref = str(prefs.get("backpack", "1"))
+        self.backpack_unlimited = tk.BooleanVar(value=backpack_pref == live.UNLIMITED)
+        self.backpack = tk.StringVar(value="1" if backpack_pref == live.UNLIMITED else backpack_pref)
+        self.sushi_speed = tk.StringVar(value=str(prefs.get("sushi_speed", "1")))
+        self.live_enabled = tk.BooleanVar()
+        # key: (preference, feature in the DLL, live setter, validator, invalid-input message)
+        self.live_specs = {
+            "swim": ("swim_speed", "swim_live", live.set_swim, live.slot_value, "水下速度請輸入 0.1–20"),
+            "backpack": ("backpack", "backpack_live", live.set_backpack, lambda v: live.slot_value(v, True), "背包容量請輸入 0.1–20"),
+            "sushi": ("sushi_speed", "sushi_live", sushi_speed.set_live, sushi_speed.slot_value, "壽司店速度請輸入 0.1–10"),
+        }
+        self.live_installed = {}
+        self.live_applied = {}
+        self.live_sync_job = None
+        self.live_state = tk.StringVar()
+        self.raw_live_state = ""
+        self.legacy_speed = None
         self.loaded = False
         self.pending = False
         self.status = tk.StringVar(value=translate(self.raw_status, self.language))
@@ -277,18 +340,31 @@ class Panel(tk.Tk):
         self.build_footer(root)
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True, pady=(12, 0))
-        options_tab = ttk.Frame(self.notebook, padding=16)
-        self.weapon_tab = ttk.Frame(self.notebook, padding=16)
-        self.notebook.add(options_tab, text=self.tr("一般設定"))
-        self.notebook.add(self.weapon_tab, text=self.tr("武器"))
+        # Each tab scrolls when the window is shorter than its content (e.g. Steam Deck, 1280x800).
+        self.scroll_tabs = [ScrollFrame(self.notebook, padding=16), ScrollFrame(self.notebook, padding=16, min_height=560, shrinkable=True)]
+        options_tab, self.weapon_tab = (tab.body for tab in self.scroll_tabs)
+        self.notebook.add(self.scroll_tabs[0], text=self.tr("一般設定"))
+        self.notebook.add(self.scroll_tabs[1], text=self.tr("武器"))
         self.build_options_tab(options_tab)
         self.build_weapon_tab()
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_all(sequence, self.wheel, add="+")
         self.bind("<Control-s>", lambda _: self.apply())
         self.bind("<F5>", lambda _: self.refresh())
         self.after(150, self.startup)
-        self.after(3000, self.poll_sushi)
+        self.after(3000, self.poll_live)
 
     # ----- layout -----
+    def wheel(self, event):
+        """Scroll the visible tab, except over the weapon list (it scrolls itself)."""
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        if widget is None or isinstance(widget, ttk.Treeview):
+            return
+        tab = self.scroll_tabs[self.notebook.index("current")]
+        if str(widget).startswith(str(tab)):
+            steps = -1 if getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0 else 1
+            tab.scroll(steps)
+
     def build_styles(self):
         style = ttk.Style(self)
         style.theme_use("clam")
@@ -300,7 +376,7 @@ class Panel(tk.Tk):
         style.configure("TLabel", background=BG, foreground=TEXT, font=(UI_FONT, 10))
         style.configure("Muted.TLabel", foreground=MUTED, font=(UI_FONT, 9))
         style.configure("Heading.TLabel", font=(UI_FONT, 12, "bold"))
-        style.configure("Title.TLabel", font=("Segoe UI", 23, "bold"), foreground="#65d5ee")
+        style.configure("Title.TLabel", font=(NUMBER_FONT, 23, "bold"), foreground="#65d5ee")
         style.configure("Badge.TLabel", padding=(10, 4), font=(UI_FONT, 9, "bold"))
         for kind, (background, foreground) in STATUS_COLORS.items():
             style.configure(f"{kind}.Status.TLabel", background=background, foreground=foreground,
@@ -311,7 +387,7 @@ class Panel(tk.Tk):
         style.configure("Pending.TButton", background="#d9a520", foreground="#101b2a", font=(UI_FONT, 11, "bold"), padding=10)
         style.map("Pending.TButton", background=[("active", "#f0bd36")])
         style.configure("Small.TButton", font=(UI_FONT, 9), padding=(8, 3))
-        style.configure("Switch.TCheckbutton", background="#20374a", foreground="white", padding=12, font=(UI_FONT, 12))
+        style.configure("Switch.TCheckbutton", background="#20374a", foreground="white", padding=(12, 9), font=(UI_FONT, 12))
         style.map("Switch.TCheckbutton", background=[("selected", ACCENT), ("active", "#2b4a61")], foreground=[("selected", "white")])
         style.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=TEXT, rowheight=28, font=(UI_FONT, 11), borderwidth=0)
         style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "white")])
@@ -367,41 +443,56 @@ class Panel(tk.Tk):
             ttk.Checkbutton(switches, textvariable=self.localized(text), variable=variable, style="Switch.TCheckbutton",
                             command=self.dirty).grid(row=index // 2, column=index % 2, sticky="ew",
                                                      padx=(0 if index % 2 == 0 else 8, 0), pady=(0, 8))
-        ttk.Label(body, textvariable=self.localized("無人機開啟後不扣搬運次數；已零次時可能需要先重新潛水。"), style="Muted.TLabel", wraplength=720).pack(anchor="w", pady=(2, 18))
-        self.speed_row(body, "水下移動速度倍率", self.speed, 20, ("1", "2", "3.5", "5"),
-                       "1 = 原始速度；可輸入 0.1–20。關閉無敵後仍會受傷。")
-        self.build_sushi_row(body)
-        ttk.Label(body, textvariable=self.localized("彈藥涵蓋共用潛水槍械流程；尚未驗證所有 DLC／特殊武器。\n遊戲更新或其他模組造成版本不同時，工具會拒絕覆寫。"), style="Muted.TLabel", wraplength=720).pack(side="bottom", anchor="w")
+        ttk.Label(body, textvariable=self.localized("無人機開啟後不扣搬運次數；已零次時可能需要先重新潛水。"), style="Muted.TLabel", wraplength=770).pack(anchor="w", pady=(0, 8))
+        self.build_live_section(body)
+        ttk.Label(body, textvariable=self.localized("彈藥涵蓋共用潛水槍械流程；尚未驗證所有 DLC／特殊武器。\n遊戲更新或其他模組造成版本不同時，工具會拒絕覆寫。"), style="Muted.TLabel", wraplength=770).pack(side="bottom", anchor="w")
 
-    def build_sushi_row(self, body):
+    def build_live_section(self, body):
         top = ttk.Frame(body)
-        top.pack(fill="x")
-        ttk.Label(top, textvariable=self.localized("壽司店移動速度倍率（遊戲中即時調整）"), style="Heading.TLabel").pack(side="left")
-        self.sushi_badge = ttk.Label(top, textvariable=self.sushi_state, style="Badge.TLabel")
-        self.sushi_badge.pack(side="right")
-        ttk.Checkbutton(body, textvariable=self.localized("啟用即時壽司店速度（關閉遊戲時套用一次即可）"), variable=self.sushi_live,
-                        command=self.dirty).pack(anchor="w", pady=(6, 0))
-        row = ttk.Frame(body)
-        row.pack(fill="x", pady=(8, 4))
-        ttk.Spinbox(row, from_=0.1, to=sushi_speed.MAX_FACTOR, increment=0.25, textvariable=self.sushi_speed, width=7,
-                    font=("Segoe UI", 15)).pack(side="left")
-        ttk.Label(row, text="×", font=("Segoe UI", 14)).pack(side="left", padx=(6, 16))
-        for value in ("1", "1.5", "2", "3"):
-            ttk.Button(row, text=f"{value}×", style="Small.TButton", width=5,
-                       command=lambda v=value: self.sushi_speed.set(v)).pack(side="left", padx=(0, 6))
-        self.sushi_speed.trace_add("write", lambda *_: self.sushi_changed())
-        ttk.Label(body, textvariable=self.localized(SUSHI_NOTE), style="Muted.TLabel", wraplength=720).pack(anchor="w", pady=(4, 18))
+        top.pack(fill="x", pady=(6, 0))
+        ttk.Label(top, textvariable=self.localized("即時倍率（遊戲中即時調整）"), style="Heading.TLabel").pack(side="left")
+        self.live_badge = ttk.Label(top, textvariable=self.live_state, style="Badge.TLabel")
+        self.live_badge.pack(side="right")
+        ttk.Checkbutton(body, textvariable=self.localized("啟用即時倍率（關閉遊戲時套用一次即可）"), variable=self.live_enabled,
+                        command=self.dirty).pack(anchor="w", pady=(6, 4))
+        grid = ttk.Frame(body)
+        grid.pack(fill="x")
+        rows = [("水下移動速度", self.swim, 20, 0.5, ("1", "2", "3.5", "5")),
+                ("背包容量", self.backpack, 20, 0.5, ("1", "2", "5", "10")),
+                ("壽司店移動速度", self.sushi_speed, sushi_speed.MAX_FACTOR, 0.25, ("1", "1.5", "2", "3"))]
+        self.backpack_widgets = []
+        for index, (title, variable, maximum, step, presets) in enumerate(rows):
+            ttk.Label(grid, textvariable=self.localized(title)).grid(row=index, column=0, sticky="w", padx=(0, 12), pady=4)
+            box = ttk.Spinbox(grid, from_=0.1, to=maximum, increment=step, textvariable=variable, width=7, font=(NUMBER_FONT, 14))
+            box.grid(row=index, column=1, sticky="w", pady=4)
+            ttk.Label(grid, text="×", font=(NUMBER_FONT, 13)).grid(row=index, column=2, padx=(6, 12))
+            buttons = ttk.Frame(grid)
+            buttons.grid(row=index, column=3, sticky="w")
+            widgets = [box]
+            for value in presets:
+                button = ttk.Button(buttons, text=f"{value}×", style="Small.TButton", width=5,
+                                    command=lambda v=value, var=variable: var.set(v))
+                button.pack(side="left", padx=(0, 6))
+                widgets.append(button)
+            if variable is self.backpack:
+                self.backpack_widgets = widgets
+                ttk.Checkbutton(buttons, textvariable=self.localized("無限"), variable=self.backpack_unlimited,
+                                command=self.backpack_mode_changed).pack(side="left", padx=(8, 0))
+            variable.trace_add("write", lambda *_: self.live_changed())
+        self.backpack_mode_changed(changed=False)
+        ttk.Label(body, textvariable=self.localized(LIVE_NOTE), style="Muted.TLabel", wraplength=770).pack(anchor="w", pady=(6, 8))
 
-    def speed_row(self, body, title, variable, maximum, presets, note):
-        ttk.Label(body, textvariable=self.localized(title), style="Heading.TLabel").pack(anchor="w")
-        row = ttk.Frame(body)
-        row.pack(fill="x", pady=(8, 4))
-        ttk.Spinbox(row, from_=0.1, to=maximum, increment=0.5, textvariable=variable, width=7, font=("Segoe UI", 15)).pack(side="left")
-        ttk.Label(row, text="×", font=("Segoe UI", 14)).pack(side="left", padx=(6, 16))
-        for value in presets:
-            ttk.Button(row, text=f"{value}×", style="Small.TButton", width=5, command=lambda v=value: variable.set(v)).pack(side="left", padx=(0, 6))
-        variable.trace_add("write", lambda *_: self.dirty())
-        ttk.Label(body, textvariable=self.localized(note), style="Muted.TLabel", wraplength=720).pack(anchor="w", pady=(4, 18))
+    def backpack_mode_changed(self, changed=True):
+        state = "disabled" if self.backpack_unlimited.get() else "normal"
+        for widget in self.backpack_widgets:
+            widget.configure(state=state)
+        if changed:
+            self.live_changed()
+
+    def live_value(self, key):
+        if key == "backpack" and self.backpack_unlimited.get():
+            return live.UNLIMITED
+        return {"swim": self.swim, "backpack": self.backpack, "sushi": self.sushi_speed}[key].get()
 
     def build_weapon_tab(self):
         body = self.weapon_tab
@@ -585,7 +676,7 @@ class Panel(tk.Tk):
         self.notebook.tab(1, text=self.tr("武器"))
         self.build_category_tabs()
         self.update_installed_badge()
-        self.sushi_state.set(self.tr(self.raw_sushi_state[0]).replace("{value}", self.raw_sushi_state[1]))
+        self.live_state.set(self.tr(self.raw_live_state))
         for column, source in (("name", "名稱"), ("level", "等級"), ("type", "類型")):
             self.weapon_list.heading(column, text=self.tr(source))
         self.filter_weapons()
@@ -607,10 +698,13 @@ class Panel(tk.Tk):
         self.weapon_enabled.set(state.get("weapon_enabled", False))
         self.weapon_installed = state.get("weapon_enabled", False)
         self.update_installed_badge()
-        self.speed.set(f"{state['speed']:.6g}")
-        self.sushi_live.set(state.get("sushi_live", False))
-        self.sushi_installed = state.get("sushi_live", False)
-        self.sushi_applied = None
+        self.live_installed = {spec[1]: state.get(spec[1], False) for spec in self.live_specs.values()}
+        self.live_enabled.set(all(self.live_installed.values()))
+        self.live_applied = {}
+        # Swimming speed used to be a file setting; carry it over to the live value once.
+        self.legacy_speed = state["speed"] if not math.isclose(state["speed"], 1, rel_tol=1e-6) else None
+        if self.legacy_speed and "swim_speed" not in self.preferences:
+            self.swim.set(f"{self.legacy_speed:.6g}")
         self.loaded = True
         self.pending = False
         self.apply_button.configure(style="Accent.TButton")
@@ -624,9 +718,12 @@ class Panel(tk.Tk):
 
     def refresh(self):
         try:
-            state, _, _ = Controller(self.path.get()).read()
+            state = Controller(self.path.get()).read()[0]
             self.set_state(state)
-            self.set_status("已讀取遊戲檔案中的目前設定。")
+            if self.legacy_speed:
+                self.set_status("水下速度目前寫在遊戲檔案中；勾選即時倍率並套用後改為即時調整。", "warning")
+            else:
+                self.set_status("已讀取遊戲檔案中的目前設定。")
             return True
         except Exception as error:
             self.loaded = False
@@ -646,7 +743,7 @@ class Panel(tk.Tk):
                 parent=self,
             ):
                 return
-            os.startfile("steam://rungameid/1868140")
+            steam_platform.launch_game()
             self.set_status("已向 Steam 發送啟動請求。")
         except Exception as error:
             self.set_status("無法啟動遊戲：" + self.error_source(error), "error")
@@ -666,15 +763,15 @@ class Panel(tk.Tk):
         try:
             state = Controller(self.path.get()).apply({
                 "ammo": self.ammo.get(), "invincible": self.invincible.get(), "drone": self.drone.get(),
-                "speed": self.speed.get(), "oxygen": self.oxygen.get(), "weapon_enabled": self.weapon_enabled.get(),
-                "sushi_live": self.sushi_live.get()})
+                "speed": 1, "oxygen": self.oxygen.get(), "weapon_enabled": self.weapon_enabled.get(),
+                **{spec[1]: self.live_enabled.get() for spec in self.live_specs.values()}})
             self.set_state(state)
             self.set_status("套用成功，已讀回核對。請重新啟動遊戲。", "success")
         except Exception as error:
             self.set_status("未能套用：" + self.error_source(error), "error")
 
     def restore(self):
-        if not messagebox.askyesno(self.tr("還原原始設定"), self.tr("將還原原始水下與壽司店速度、氧氣、彈藥、無人機、受傷規則與武器選擇器。是否繼續？"), parent=self):
+        if not messagebox.askyesno(self.tr("還原原始設定"), self.tr("將還原原始水下與壽司店速度、背包容量、氧氣、彈藥、無人機、受傷規則與武器選擇器，並移除即時倍率。是否繼續？"), parent=self):
             return
         try:
             self.set_state(Controller(self.path.get()).apply({"ammo": False, "invincible": False, "drone": False, "oxygen": False, "speed": 1}))
@@ -682,55 +779,58 @@ class Panel(tk.Tk):
         except Exception as error:
             self.set_status("還原失敗：" + self.error_source(error), "error")
 
-    # ----- live sushi-bar speed -----
-    def sushi_message(self, source, kind, value=""):
-        self.raw_sushi_state = (source, value)
-        self.sushi_state.set(self.tr(source).replace("{value}", value))
+    # ----- live multipliers (swimming, backpack, sushi bar) -----
+    def live_message(self, source, kind):
+        self.raw_live_state = source
+        self.live_state.set(self.tr(source))
         background, foreground = STATUS_COLORS[kind] if source else (BG, TEXT)
-        self.sushi_badge.configure(background=background, foreground=foreground)
+        self.live_badge.configure(background=background, foreground=foreground)
 
-    def sushi_changed(self):
-        self.save_preference("sushi_speed", self.sushi_speed.get())
-        if self.sushi_sync_job is not None:
-            self.after_cancel(self.sushi_sync_job)
-        self.sushi_sync_job = self.after(300, self.sync_sushi)
+    def live_changed(self):
+        for key, spec in self.live_specs.items():
+            self.preferences[spec[0]] = self.live_value(key)
+        self.save_preference("language", self.language)  # writes the whole preferences file
+        if self.live_sync_job is not None:
+            self.after_cancel(self.live_sync_job)
+        self.live_sync_job = self.after(300, self.sync_live)
 
-    def poll_sushi(self):
-        self.sync_sushi()
-        self.after(3000, self.poll_sushi)
+    def poll_live(self):
+        self.sync_live()
+        self.after(3000, self.poll_live)
 
-    def sync_sushi(self):
-        """Keep the running game's sushi-bar factor equal to the panel value."""
-        self.sushi_sync_job = None
-        try:
-            factor = float(self.sushi_speed.get())
-            sushi_speed.slot_value(factor)
-        except ValueError:
-            self.sushi_message("請輸入 0.1–10", "error")
-            return
-        label = f"{factor:g}×"
-        if not self.sushi_installed:
-            self.sushi_message("未安裝" if self.loaded else "", "warning")
+    def sync_live(self):
+        """Keep the running game's live factors equal to the panel values."""
+        self.live_sync_job = None
+        for key, (_, _, _, validate, message) in self.live_specs.items():
+            try:
+                validate(self.live_value(key))
+            except ValueError:
+                self.live_message(message, "error")
+                return
+        installed = [key for key, spec in self.live_specs.items() if self.live_installed.get(spec[1])]
+        if not installed:
+            self.live_message("未安裝" if self.loaded else "", "warning")
             return
         try:
             running = game_running()
         except OSError:
             running = False
         if not running:
-            self.sushi_applied = None
-            self.sushi_message("遊戲未執行；啟動後自動套用 {value}", "info", label)
-            return
-        if self.sushi_applied == factor:
+            self.live_applied = {}
+            self.live_message("遊戲未執行；啟動後自動套用", "info")
             return
         try:
-            sushi_speed.set_live(self.path.get(), factor)
-            self.sushi_applied = factor
-            self.sushi_message("遊戲中已生效：{value}", "success", label)
+            for key in installed:
+                value = self.live_value(key)
+                if self.live_applied.get(key) != value:
+                    self.live_specs[key][2](self.path.get(), value)
+                    self.live_applied[key] = value
+            partial = len(installed) < len(self.live_specs)
+            self.live_message("部分生效；請在遊戲關閉時重新套用" if partial else "遊戲中已生效", "warning" if partial else "success")
         except Exception as error:
             # The game may still be starting (GameAssembly.dll not loaded yet); retry on the next poll.
-            self.sushi_message(self.error_source(error), "warning")
+            self.live_message(self.error_source(error), "warning")
 
-    # ----- weapons -----
     def row_name(self, row):
         """Official in-game name in the panel language (derived identifier name as fallback)."""
         return row.get("names", {}).get(self.language) or row["name"]
@@ -866,7 +966,7 @@ class Panel(tk.Tk):
         try:
             if not self.weapon_installed:
                 raise ValueError(self.tr("請先關閉遊戲並啟用武器選擇器，再重新啟動遊戲。"))
-            position = weapons.log_position()
+            position = weapons.log_position(steam_platform.player_log(self.path.get()))
             weapons.arm_live(self.path.get(), item_id, {row["id"] for row in self.weapon_catalog})
             self.queue_log_position = position
             self.weapon_message("已排入「{name}」。回到遊戲按一次「切換武器」鍵（預設 Tab）即可裝備。", "warning", item_id)
@@ -884,7 +984,7 @@ class Panel(tk.Tk):
     def poll_equip(self, item_id, remaining):
         self.equip_poll = None
         try:
-            events = weapons.equip_events(self.queue_log_position)
+            events = weapons.equip_events(self.queue_log_position, steam_platform.player_log(self.path.get()))
         except OSError:
             events = []
         if events:
